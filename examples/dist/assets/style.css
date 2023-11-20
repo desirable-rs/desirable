@@ -1,0 +1,20 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+h1 {
+  color: #404040;
+  font-size: 30px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+  min-height: 800px;
+}
