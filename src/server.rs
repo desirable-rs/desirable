@@ -24,8 +24,8 @@ impl Service<HyperRequest> for Svc {
   fn call(&self, req: HyperRequest) -> Self::Future {
     let router = self.router.clone();
     let remote_addr = self.remote_addr.clone();
-    let res = dispatch(req, remote_addr, router);
-    Box::pin(async { res.await })
+    let res = async { dispatch(req, remote_addr, router).await };
+    Box::pin(res)
   }
 }
 
@@ -50,7 +50,7 @@ impl Server {
   }
 
   pub async fn run(&self, router: Router) -> Result<()> {
-    let addr: SocketAddr = self.addr.into();
+    let addr: SocketAddr = self.addr;
     let listener = TcpListener::bind(addr).await?;
     info!("Listening on http://{}", addr);
     let router = Arc::new(router);

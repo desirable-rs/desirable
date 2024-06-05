@@ -3,19 +3,19 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
   #[error("hyper error {0:?}")]
-  HyperError(#[from] hyper::Error),
+  Hyper(#[from] hyper::Error),
   #[error("http error {0:?}")]
-  HTTPError(#[from] hyper::http::Error),
+  HTTP(#[from] hyper::http::Error),
   #[error("json error {0:?}")]
-  JsonError(#[from] serde_json::Error),
+  Json(#[from] serde_json::Error),
   #[error("IO error {0:?}")]
-  IOError(#[from] std::io::Error),
+  IO(#[from] std::io::Error),
   #[error("any error {0:?}")]
-  AnyError(#[from] anyhow::Error),
+  Any(#[from] anyhow::Error),
   #[error("query error {0:?}")]
-  UrlencodedError(#[from] serde_urlencoded::de::Error),
+  Urlencoded(#[from] serde_urlencoded::de::Error),
   #[error("addr parse error {0:?}")]
-  AddrParseError(#[from] std::net::AddrParseError),
+  AddrParse(#[from] std::net::AddrParseError),
   #[error("InvalidStatusCode {0:?}")]
   InvalidStatusCode(#[from] hyper::http::status::InvalidStatusCode),
   #[error("missing url param {name:?}")]

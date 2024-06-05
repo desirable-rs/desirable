@@ -12,7 +12,11 @@ pub struct Router {
 async fn default_handler(_req: Request) -> impl IntoResponse {
   "handle not found"
 }
-
+impl Default for Router {
+  fn default() -> Self {
+    Self::new()
+  }
+}
 impl Router {
   pub fn new() -> Self {
     Router {
@@ -31,7 +35,7 @@ impl Router {
     self
       .routes
       .entry(method)
-      .or_insert_with(route_recognizer::Router::new)
+      .or_default()
       .add(path.as_str(), Box::new(dest));
   }
 
@@ -82,7 +86,7 @@ impl Router {
     let endpoint = match self.routes.get(method) {
       Some(route) => match route.recognize(path) {
         Ok(m) => {
-          params = m.params().to_owned();
+          m.params().clone_into(&mut params);
           &***m.handler()
         }
         Err(_e) => &*self.not_found_handler,
@@ -93,7 +97,7 @@ impl Router {
     req.params = params;
     req.remote_addr = Some(remote_addr);
     let next = Next {
-      endpoint: endpoint,
+      endpoint,
       middlewares: &self.middlewares,
     };
     next.run(req).await

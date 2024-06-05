@@ -2,12 +2,12 @@ use crate::error::{invalid_param, missing_param};
 use crate::AnyResult;
 use crate::HyperRequest;
 use crate::Result;
+use bytes::Buf;
+use http_body_util::BodyExt;
 use hyper::http::Extensions;
 use route_recognizer::Params;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use http_body_util::BodyExt;
-use bytes::Buf;
 #[derive(Debug)]
 pub struct Request {
   pub inner: HyperRequest,
@@ -20,10 +20,10 @@ impl Request {
     Self {
       inner: request,
       params: Params::new(),
-      remote_addr: remote_addr,
+      remote_addr,
     }
   }
-  pub fn request(request: HyperRequest) -> Self {
+  pub fn mk_request(request: HyperRequest) -> Self {
     Request::new(request, None)
   }
   pub fn method(&self) -> &hyper::Method {
@@ -39,7 +39,7 @@ impl Request {
     &self.params
   }
   pub fn extensions(&self) -> &Extensions {
-    &self.inner.extensions()
+    self.inner.extensions()
   }
   pub fn extensions_mut(&mut self) -> &mut Extensions {
     self.inner.extensions_mut()
