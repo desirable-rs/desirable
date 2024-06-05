@@ -26,3 +26,5 @@ pub fn new(addr: &str) -> Server {
 
 // re-export
 pub use hyper::http;
+pub use hyper::body;
+pub use hyper::header;
