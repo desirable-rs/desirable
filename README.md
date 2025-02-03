@@ -2,7 +2,7 @@
 
 > desirable is a minimal and pragmatic Rust web application framework.
 
-# Example
+## Example
 
 [examples](https://github.com/desirable-rs/desirable/tree/main/examples)
 
@@ -61,5 +61,4 @@ async fn main() -> desirable::Result<()> {
 
 [axum](https://github.com/tokio-rs/axum)
 
-
-[基于hyper构建一个Web框架](https://zhuanlan.zhihu.com/p/164920970)
+[基于 hyper 构建一个 Web 框架](https://zhuanlan.zhihu.com/p/164920970)
