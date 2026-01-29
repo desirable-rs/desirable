@@ -71,16 +71,15 @@ impl Router {
   /// router.at(hyper::Method::GET, "/test", |_| async { "test" });
   /// ```
   pub fn at(&mut self, method: hyper::Method, route: &str, dest: impl Endpoint) {
-    let mut path = String::from("");
-    if let Some(prefix) = &self.prefix {
-      path.push_str(prefix.as_str());
-    }
-    path.push_str(route);
+    let path = match &self.prefix {
+      Some(prefix) => format!("{}{}", prefix, route),
+      None => route.to_string(),
+    };
     self
       .routes
       .entry(method)
       .or_default()
-      .add(path.as_str(), Box::new(dest));
+      .add(&path, Box::new(dest));
   }
 
   /// Adds a GET route.
@@ -335,6 +334,6 @@ mod tests {
     router1.merge(router2);
 
     // Both routes should be accessible
-    assert!(router1.routes.get(&hyper::Method::GET).is_some());
+    assert!(router1.routes.contains_key(&hyper::Method::GET));
   }
 }

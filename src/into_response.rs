@@ -4,6 +4,14 @@ use http_body_util::Full;
 use hyper::header;
 use std::borrow::Cow;
 
+/// Cached content-type header value for plain text responses.
+static CONTENT_TYPE_TEXT: header::HeaderValue =
+  header::HeaderValue::from_static("text/plain; charset=utf-8");
+
+/// Cached content-type header value for octet-stream responses.
+static CONTENT_TYPE_OCTET: header::HeaderValue =
+  header::HeaderValue::from_static("application/octet-stream");
+
 /// Trait for types that can be converted into an HTTP response.
 ///
 /// This is the core trait for handler return types in the framework.
@@ -73,10 +81,10 @@ impl IntoResponse for String {
 impl IntoResponse for Cow<'static, str> {
   fn into_response(self) -> Result {
     let mut res = Full::from(self).into_response()?;
-    res.inner.headers_mut().insert(
-      header::CONTENT_TYPE,
-      header::HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref()),
-    );
+    res
+      .inner
+      .headers_mut()
+      .insert(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone());
     Ok(res)
   }
 }
@@ -110,16 +118,10 @@ impl IntoResponse for () {
   }
 }
 
-impl IntoResponse for Response {
-  fn into_response(self) -> Result {
-    Ok(self)
-  }
-}
-
 impl IntoResponse for (hyper::StatusCode, String) {
   fn into_response(self) -> Result {
     let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string())
+      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
       .status(self.0)
       .body(Full::new(Bytes::from(self.1)))?
       .into();
@@ -130,7 +132,7 @@ impl IntoResponse for (hyper::StatusCode, String) {
 impl IntoResponse for (hyper::StatusCode, &'static str) {
   fn into_response(self) -> Result {
     let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string())
+      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
       .status(self.0)
       .body(Full::new(Bytes::from(self.1)))?
       .into();
@@ -141,7 +143,7 @@ impl IntoResponse for (hyper::StatusCode, &'static str) {
 impl IntoResponse for (u16, String) {
   fn into_response(self) -> Result {
     let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string())
+      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
       .status(hyper::StatusCode::from_u16(self.0)?)
       .body(Full::new(Bytes::from(self.1)))?
       .into();
@@ -152,7 +154,7 @@ impl IntoResponse for (u16, String) {
 impl IntoResponse for (u16, &'static str) {
   fn into_response(self) -> Result {
     let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string())
+      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
       .status(hyper::StatusCode::from_u16(self.0)?)
       .body(Full::new(Bytes::from(self.1)))?
       .into();
@@ -163,10 +165,10 @@ impl IntoResponse for (u16, &'static str) {
 impl IntoResponse for Bytes {
   fn into_response(self) -> Result {
     let mut res = Full::from(self).into_response()?;
-    res.inner.headers_mut().insert(
-      header::CONTENT_TYPE,
-      header::HeaderValue::from_static(mime::APPLICATION_OCTET_STREAM.as_ref()),
-    );
+    res
+      .inner
+      .headers_mut()
+      .insert(header::CONTENT_TYPE, CONTENT_TYPE_OCTET.clone());
     Ok(res)
   }
 }
@@ -174,6 +176,12 @@ impl IntoResponse for Bytes {
 impl IntoResponse for BytesMut {
   fn into_response(self) -> Result {
     self.freeze().into_response()
+  }
+}
+
+impl IntoResponse for crate::Response {
+  fn into_response(self) -> Result {
+    Ok(self)
   }
 }
 

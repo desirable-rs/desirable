@@ -4,6 +4,20 @@ use http_body_util::Full;
 use hyper::StatusCode;
 use hyper::header;
 
+/// Cached content-type header value for JSON responses.
+static CONTENT_TYPE_JSON: header::HeaderValue =
+  header::HeaderValue::from_static("application/json");
+
+/// Cached content-type header value for plain text responses.
+static CONTENT_TYPE_TEXT: header::HeaderValue =
+  header::HeaderValue::from_static("text/plain; charset=utf-8");
+
+/// Cached content-type header value for octet-stream responses.
+/// Currently unused but kept for potential future byte-based responses.
+#[allow(dead_code)]
+static CONTENT_TYPE_OCTET: header::HeaderValue =
+  header::HeaderValue::from_static("application/octet-stream");
+
 /// The HTTP response type for the desirable framework.
 ///
 /// Provides constructors for common response types and ergonomic builders.
@@ -80,8 +94,8 @@ impl Response {
   /// ```
   pub fn with_status(status: u16, val: String) -> Result<Self> {
     let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string())
-      .status(hyper::StatusCode::from_u16(status)?)
+      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
+      .status(StatusCode::from_u16(status)?)
       .body(Full::new(Bytes::from(val)))?
       .into();
     Ok(response)
@@ -116,9 +130,9 @@ impl Response {
   where
     T: serde::Serialize + Sized + Send + Sync + 'static,
   {
-    let data = serde_json::to_string(&payload)?;
+    let data = serde_json::to_vec(&payload)?;
     let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+      .header(header::CONTENT_TYPE, CONTENT_TYPE_JSON.clone())
       .body(Full::new(Bytes::from(data)))?
       .into();
     Ok(response)
@@ -159,10 +173,7 @@ impl From<HyperResponse> for Response {
 impl From<()> for Response {
   fn from(_: ()) -> Self {
     hyper::http::Response::builder()
-      .header(
-        hyper::header::CONTENT_TYPE,
-        mime::TEXT_PLAIN_UTF_8.to_string(),
-      )
+      .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
       .body(Full::new(Bytes::default()))
       .unwrap()
       .into()
@@ -172,10 +183,7 @@ impl From<()> for Response {
 impl From<String> for Response {
   fn from(val: String) -> Self {
     hyper::http::Response::builder()
-      .header(
-        hyper::header::CONTENT_TYPE,
-        mime::TEXT_PLAIN_UTF_8.to_string(),
-      )
+      .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
       .body(Full::new(Bytes::from(val)))
       .unwrap()
       .into()
@@ -185,10 +193,7 @@ impl From<String> for Response {
 impl From<&'static str> for Response {
   fn from(val: &'static str) -> Self {
     hyper::http::Response::builder()
-      .header(
-        hyper::header::CONTENT_TYPE,
-        mime::TEXT_PLAIN_UTF_8.to_string(),
-      )
+      .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
       .body(Full::new(Bytes::from(val)))
       .unwrap()
       .into()
