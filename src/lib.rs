@@ -38,6 +38,7 @@ pub mod request;
 pub mod response;
 pub mod router;
 pub mod server;
+pub mod session;
 pub mod types;
 pub mod utils;
 
@@ -49,6 +50,7 @@ pub use request::Request;
 pub use response::Response;
 pub use router::Router;
 pub use server::Server;
+pub use session::{Session, SessionConfig, SessionError, SessionManager};
 
 pub use types::{AnyResult, HyperRequest, HyperResponse, Result};
 

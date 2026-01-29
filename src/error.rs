@@ -59,6 +59,9 @@ pub enum Error {
   /// Custom error message
   #[error("error msg {msg:?}")]
   Message { msg: String },
+  /// Session error
+  #[error("session error {0:?}")]
+  Session(#[from] crate::session::SessionError),
 }
 
 /// Creates a `MissingParam` error.
