@@ -61,7 +61,7 @@ use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use hyper::http;
-use rand::RngCore;
+use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -489,7 +489,7 @@ impl SessionConfig {
 impl Default for SessionConfig {
   fn default() -> Self {
     let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut key);
     Self::new(&key)
   }
 }
@@ -540,7 +540,7 @@ impl SessionData {
   pub fn new() -> Self {
     let now = Utc::now();
     let mut bytes = [0u8; SESSION_ID_LENGTH];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let id = base64::engine::general_purpose::URL_SAFE.encode(bytes);
     Self {
       id,
@@ -1059,7 +1059,7 @@ impl Session {
   /// ```
   pub fn regenerate_id(&mut self) {
     let mut bytes = [0u8; SESSION_ID_LENGTH];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     self.inner.id = base64::engine::general_purpose::URL_SAFE.encode(bytes);
     self.modified = true;
   }
