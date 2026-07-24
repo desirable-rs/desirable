@@ -34,6 +34,7 @@ pub mod error;
 pub mod fs;
 pub mod into_response;
 pub mod kernel;
+pub mod middleware;
 pub mod request;
 pub mod response;
 pub mod router;
