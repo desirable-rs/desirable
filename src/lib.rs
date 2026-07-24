@@ -30,6 +30,7 @@
 //! - **Static Files** - file and directory serving
 //! - **Async/Await** - fully asynchronous throughout
 
+pub mod cors;
 pub mod error;
 pub mod fs;
 pub mod into_response;
