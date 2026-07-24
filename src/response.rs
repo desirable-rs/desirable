@@ -175,11 +175,7 @@ impl Response {
   /// ```rust,ignore
   /// response.set_header(header::CONTENT_TYPE, "application/json".parse().unwrap());
   /// ```
-  pub fn set_header(
-    &mut self,
-    key: hyper::header::HeaderName,
-    value: hyper::header::HeaderValue,
-  ) {
+  pub fn set_header(&mut self, key: hyper::header::HeaderName, value: hyper::header::HeaderValue) {
     self.inner.headers_mut().insert(key, value);
   }
 
@@ -322,15 +318,10 @@ mod tests {
 
   #[test]
   fn test_response_with_header() {
-    let response = Response::body("test")
-      .unwrap()
-      .with_header(
-        hyper::header::HeaderName::from_static("x-custom"),
-        hyper::header::HeaderValue::from_static("chained"),
-      );
-    assert_eq!(
-      response.inner.headers().get("x-custom").unwrap(),
-      "chained"
+    let response = Response::body("test").unwrap().with_header(
+      hyper::header::HeaderName::from_static("x-custom"),
+      hyper::header::HeaderValue::from_static("chained"),
     );
+    assert_eq!(response.inner.headers().get("x-custom").unwrap(), "chained");
   }
 }

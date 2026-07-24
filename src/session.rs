@@ -461,7 +461,7 @@ impl SessionConfig {
   /// # Arguments
   ///
   /// * `secs` - The maximum age in seconds. `None` creates a session cookie
-  ///            that is deleted when the browser closes.
+  ///   that is deleted when the browser closes.
   ///
   /// # Returns
   ///
@@ -818,7 +818,7 @@ impl Session {
   /// # Type Parameters
   ///
   /// * `T` - The type to deserialize the value as. Must implement
-  ///         `serde::Deserialize`.
+  ///   `serde::Deserialize`.
   ///
   /// # Arguments
   ///
@@ -937,7 +937,7 @@ impl Session {
   /// # Type Parameters
   ///
   /// * `T` - The type to deserialize the value as. Must implement
-  ///         `serde::Deserialize`.
+  ///   `serde::Deserialize`.
   ///
   /// # Arguments
   ///

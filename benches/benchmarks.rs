@@ -13,7 +13,7 @@ use std::collections::HashMap;
 // ===== Router Creation Benchmarks =====
 
 fn router_creation_benchmark(c: &mut Criterion) {
-  c.bench_function("router_new", |b| b.iter(|| Router::new()));
+  c.bench_function("router_new", |b| b.iter(Router::new));
 
   c.bench_function("router_with_single_route", |b| {
     b.iter(|| {
@@ -145,7 +145,7 @@ fn into_response_benchmark(c: &mut Criterion) {
 
 fn route_recognition_benchmark(c: &mut Criterion) {
   c.bench_function("route_recognizer_new", |b| {
-    b.iter(|| RouteRecognizer::<()>::new())
+    b.iter(RouteRecognizer::<()>::new)
   });
 
   c.bench_function("route_recognizer_add_single", |b| {
@@ -199,7 +199,7 @@ fn route_recognition_benchmark(c: &mut Criterion) {
 // ===== Params Access Benchmarks =====
 
 fn params_access_benchmark(c: &mut Criterion) {
-  c.bench_function("params_new", |b| b.iter(|| Params::new()));
+  c.bench_function("params_new", |b| b.iter(Params::new));
 
   c.bench_function("params_find_empty", |b| {
     let params = Params::new();
