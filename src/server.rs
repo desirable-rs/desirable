@@ -101,9 +101,10 @@ impl Server {
     }
   }
 
-  /// Starts the server and serves requests indefinitely.
+  /// Starts the server and serves requests until shutdown signal.
   ///
-  /// This method blocks until the server is stopped (e.g., via signal).
+  /// Delegates to [`Server::run_graceful`]. Listens for Ctrl+C (SIGINT) and
+  /// performs a graceful shutdown.
   ///
   /// # Arguments
   ///
@@ -112,40 +113,84 @@ impl Server {
   /// # Returns
   ///
   /// `Ok(())` on normal shutdown, or an error on failure
-  ///
-  /// # Behavior
-  ///
-  /// - Binds a TCP listener to the configured address
-  /// - Logs the listening address
-  /// - Accepts connections in a loop
-  /// - Spawns each connection as an async task
-  /// - Logs connection errors without propagating them
   pub async fn run(&self, router: Router) -> Result<()> {
+    self.run_graceful(router).await
+  }
+
+  /// Starts the server with explicit graceful shutdown support.
+  ///
+  /// Binds a TCP listener to the configured address and serves requests
+  /// until a Ctrl+C (SIGINT) signal is received, at which point the
+  /// server stops accepting new connections and returns.
+  ///
+  /// # Arguments
+  ///
+  /// * `router` - The application router to handle requests
+  ///
+  /// # Returns
+  ///
+  /// `Ok(())` on graceful shutdown, or an error on bind/accept failure
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// use desirable::{Router, Result};
+  ///
+  /// #[tokio::main]
+  /// async fn main() -> Result<()> {
+  ///   let router = Router::new();
+  ///   router.get("/", || async { "Hello!" });
+  ///
+  ///   let server = desirable::new("127.0.0.1:8080");
+  ///   server.run_graceful(router).await
+  /// }
+  /// ```
+  pub async fn run_graceful(&self, router: Router) -> Result<()> {
     let addr: SocketAddr = self.addr;
     let listener = TcpListener::bind(addr).await?;
     info!("Listening on http://{}", addr);
+
     let router = Arc::new(router);
-    loop {
-      let router = router.clone();
-      let (stream, remote_addr) = listener.accept().await?;
-      let io = TokioIo::new(stream);
-      let remote_addr = Arc::new(remote_addr);
-      tokio::task::spawn(async move {
-        if let Err(err) = http1::Builder::new()
-          .serve_connection(
-            io,
-            Svc {
-              router,
-              remote_addr,
-            },
-          )
-          .await
-        {
-          error!("Failed to serve connection: {:?}", err);
-        }
-      });
+
+    tokio::select! {
+      result = accept_loop(listener, router) => result,
+      _ = shutdown_signal() => {
+        info!("Shutdown signal received, stopping...");
+        Ok(())
+      }
     }
   }
+}
+
+/// Accepts connections in a loop until the listener is closed or an error occurs.
+async fn accept_loop(listener: TcpListener, router: Arc<Router>) -> Result<()> {
+  loop {
+    let router = router.clone();
+    let (stream, remote_addr) = listener.accept().await?;
+    let io = TokioIo::new(stream);
+    let remote_addr = Arc::new(remote_addr);
+    tokio::task::spawn(async move {
+      if let Err(err) = http1::Builder::new()
+        .serve_connection(
+          io,
+          Svc {
+            router,
+            remote_addr,
+          },
+        )
+        .await
+      {
+        error!("Failed to serve connection: {:?}", err);
+      }
+    });
+  }
+}
+
+/// Waits for a shutdown signal (Ctrl+C).
+async fn shutdown_signal() {
+  tokio::signal::ctrl_c()
+    .await
+    .expect("failed to install Ctrl+C handler");
 }
 
 #[cfg(test)]

@@ -30,10 +30,12 @@
 //! - **Static Files** - file and directory serving
 //! - **Async/Await** - fully asynchronous throughout
 
+pub mod cors;
 pub mod error;
 pub mod fs;
 pub mod into_response;
 pub mod kernel;
+pub mod middleware;
 pub mod request;
 pub mod response;
 pub mod router;
@@ -42,10 +44,12 @@ pub mod session;
 pub mod types;
 pub mod utils;
 
+pub use cors::Cors;
 pub use error::Error;
 pub use fs::{ServeDir, ServeFile};
 pub use into_response::IntoResponse;
 pub use kernel::{DynEndpoint, Endpoint, Middleware, Next};
+pub use middleware::Logger;
 pub use request::Request;
 pub use response::Response;
 pub use router::Router;

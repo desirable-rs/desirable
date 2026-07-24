@@ -162,6 +162,45 @@ impl Response {
       .into();
     Ok(response)
   }
+
+  /// Sets a header on this response (mutable reference).
+  ///
+  /// # Arguments
+  ///
+  /// * `key` - The header name
+  /// * `value` - The header value
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// response.set_header(header::CONTENT_TYPE, "application/json".parse().unwrap());
+  /// ```
+  pub fn set_header(&mut self, key: hyper::header::HeaderName, value: hyper::header::HeaderValue) {
+    self.inner.headers_mut().insert(key, value);
+  }
+
+  /// Builder-style header setter. Consumes self and returns Self for chaining.
+  ///
+  /// # Arguments
+  ///
+  /// * `key` - The header name
+  /// * `value` - The header value
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// let response = Response::body("hello")?
+  ///     .with_header(header::CONTENT_TYPE, "text/plain".parse().unwrap());
+  /// ```
+  #[must_use]
+  pub fn with_header(
+    mut self,
+    key: hyper::header::HeaderName,
+    value: hyper::header::HeaderValue,
+  ) -> Self {
+    self.set_header(key, value);
+    self
+  }
 }
 
 impl From<HyperResponse> for Response {
@@ -265,5 +304,24 @@ mod tests {
   fn test_response_from_unit() {
     let response: Response = ().into();
     assert_eq!(response.status(), StatusCode::OK);
+  }
+
+  #[test]
+  fn test_response_set_header() {
+    let mut response = Response::body("test").unwrap();
+    response.set_header(
+      hyper::header::HeaderName::from_static("x-custom"),
+      hyper::header::HeaderValue::from_static("value"),
+    );
+    assert_eq!(response.inner.headers().get("x-custom").unwrap(), "value");
+  }
+
+  #[test]
+  fn test_response_with_header() {
+    let response = Response::body("test").unwrap().with_header(
+      hyper::header::HeaderName::from_static("x-custom"),
+      hyper::header::HeaderValue::from_static("chained"),
+    );
+    assert_eq!(response.inner.headers().get("x-custom").unwrap(), "chained");
   }
 }
