@@ -212,6 +212,91 @@ impl Request {
       None => Err(missing_param(param)),
     }
   }
+
+  /// Retrieves a path parameter as a `String` without requiring a type annotation.
+  ///
+  /// This is a convenience method for the common case of extracting string parameters.
+  ///
+  /// # Arguments
+  ///
+  /// * `name` - The name of the parameter to retrieve
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// // Route: /files/:filename
+  /// async fn get_file(req: Request) -> Result {
+  ///   let filename = req.param_str("filename")?;
+  ///   // No ::<String> turbofish needed
+  ///   Ok(format!("File: {}", filename).into())
+  /// }
+  /// ```
+  pub fn param_str(&self, name: &str) -> Result<String> {
+    self.param::<String>(name)
+  }
+
+  /// Parses the query string into type `T`, returning `T::default()` when
+  /// no query string is present.
+  ///
+  /// Unlike [`Request::query`], this method never returns `None`.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - A type that implements `serde::DeserializeOwned` and `Default`
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// #[derive(serde::Deserialize, Default)]
+  /// struct Pagination {
+  ///   page: u32,  // defaults to 0
+  ///   limit: u32, // defaults to 0
+  /// }
+  ///
+  /// async fn list_items(req: Request) -> Result {
+  ///   let pagination = req.query_or_default::<Pagination>()?;
+  ///   // Always has a value — no Option handling needed
+  /// }
+  /// ```
+  pub fn query_or_default<T>(&self) -> AnyResult<T>
+  where
+    T: serde::de::DeserializeOwned + Default,
+  {
+    if let Some(query) = self.uri().query() {
+      Ok(serde_urlencoded::from_str::<T>(query)?)
+    } else {
+      Ok(T::default())
+    }
+  }
+
+  /// Deserializes the request body as JSON into type `T`.
+  ///
+  /// This is an alias for [`Request::body`] with a more descriptive name.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - A type that implements `serde::DeserializeOwned`
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// #[derive(serde::Deserialize)]
+  /// struct Login {
+  ///   username: String,
+  ///   password: String,
+  /// }
+  ///
+  /// async fn login(mut req: Request) -> Result {
+  ///   let credentials: Login = req.body_json().await?;
+  ///   Ok("Logged in".into())
+  /// }
+  /// ```
+  pub async fn body_json<T>(&mut self) -> AnyResult<T>
+  where
+    T: serde::de::DeserializeOwned + Send + Sync + 'static,
+  {
+    self.body::<T>().await
+  }
 }
 
 impl From<HyperRequest> for Request {

@@ -113,7 +113,11 @@ impl Response {
   ///
   /// # Returns
   ///
-  /// A `Result` containing the response or a serialization error
+  /// A JSON response with `Content-Type: application/json`
+  ///
+  /// # Panics
+  ///
+  /// Panics if serialization fails. This should never happen for well-formed types.
   ///
   /// # Example
   ///
@@ -124,18 +128,17 @@ impl Response {
   ///   name: String,
   /// }
   ///
-  /// Response::json(&User { id: 1, name: "Alice" })
+  /// // Now supports references without 'static bound:
+  /// let user = User { id: 1, name: "Alice".into() };
+  /// Response::json(&user)
   /// ```
-  pub fn json<T>(payload: T) -> Result<Self>
-  where
-    T: serde::Serialize + Sized + Send + Sync + 'static,
-  {
-    let data = serde_json::to_vec(&payload)?;
-    let response = hyper::http::Response::builder()
+  pub fn json<T: serde::Serialize>(payload: T) -> Self {
+    let data = serde_json::to_vec(&payload).expect("JSON serialization failed");
+    hyper::http::Response::builder()
       .header(header::CONTENT_TYPE, CONTENT_TYPE_JSON.clone())
-      .body(Full::new(Bytes::from(data)))?
-      .into();
-    Ok(response)
+      .body(Full::new(Bytes::from(data)))
+      .unwrap()
+      .into()
   }
 
   /// Creates a redirect response to the given URL.
@@ -200,6 +203,111 @@ impl Response {
   ) -> Self {
     self.set_header(key, value);
     self
+  }
+
+  /// Returns a [`ResponseBuilder`] for constructing a response with the
+  /// builder pattern.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// Response::builder()
+  ///     .status(StatusCode::CREATED)
+  ///     .header("X-Custom".parse().unwrap(), "value".parse().unwrap())
+  ///     .json(&my_data)
+  /// ```
+  #[must_use]
+  pub fn builder() -> ResponseBuilder {
+    ResponseBuilder::new()
+  }
+}
+
+/// Builder for constructing HTTP responses.
+///
+/// Provides chainable methods for setting status, headers, and body.
+/// Created via [`Response::builder()`].
+pub struct ResponseBuilder {
+  inner: hyper::http::response::Builder,
+}
+
+impl ResponseBuilder {
+  fn new() -> Self {
+    Self {
+      inner: hyper::http::response::Builder::new(),
+    }
+  }
+
+  /// Sets the HTTP status code.
+  #[must_use]
+  pub fn status(mut self, status: hyper::StatusCode) -> Self {
+    self.inner = self.inner.status(status);
+    self
+  }
+
+  /// Sets the HTTP status code from a `u16`.
+  ///
+  /// # Panics
+  ///
+  /// Panics if the status code is invalid (not in the range 100-999).
+  #[must_use]
+  pub fn status_u16(self, status: u16) -> Self {
+    self.status(hyper::StatusCode::from_u16(status).expect("invalid HTTP status code"))
+  }
+
+  /// Sets a header on the response.
+  #[must_use]
+  pub fn header(
+    mut self,
+    key: hyper::header::HeaderName,
+    value: hyper::header::HeaderValue,
+  ) -> Self {
+    self.inner = self.inner.header(key, value);
+    self
+  }
+
+  /// Sets the response body as plain text with `Content-Type: text/plain; charset=utf-8`.
+  ///
+  /// # Returns
+  ///
+  /// A `Result` containing the response or an HTTP builder error.
+  pub fn text<T>(self, body: T) -> Result<Response>
+  where
+    Bytes: From<T>,
+  {
+    let response = self
+      .inner
+      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
+      .body(Full::new(Bytes::from(body)))?
+      .into();
+    Ok(response)
+  }
+
+  /// Sets the response body as JSON with `Content-Type: application/json`.
+  ///
+  /// # Panics
+  ///
+  /// Panics if serialization fails.
+  pub fn json<T: serde::Serialize>(self, payload: T) -> Response {
+    let data = serde_json::to_vec(&payload).expect("JSON serialization failed");
+    self
+      .inner
+      .header(header::CONTENT_TYPE, CONTENT_TYPE_JSON.clone())
+      .body(Full::new(Bytes::from(data)))
+      .unwrap()
+      .into()
+  }
+
+  /// Sets the response body without modifying headers.
+  ///
+  /// # Returns
+  ///
+  /// A `Result` containing the response or an HTTP builder error.
+  pub fn body<T>(self, body: T) -> Result<Response>
+  where
+    Bytes: From<T>,
+  {
+    let response = self.inner.body(Full::new(Bytes::from(body)))?.into();
+    Ok(response)
   }
 }
 
@@ -278,7 +386,21 @@ mod tests {
       name: "test".to_string(),
       value: 42,
     };
-    let response = Response::json(data).unwrap();
+    let response = Response::json(data);
+    assert_eq!(response.status(), StatusCode::OK);
+  }
+
+  #[test]
+  fn test_response_json_ref() {
+    #[derive(serde::Serialize)]
+    struct TestData {
+      name: String,
+    }
+    let data = TestData {
+      name: "ref".to_string(),
+    };
+    // Can now pass references without 'static bound
+    let response = Response::json(&data);
     assert_eq!(response.status(), StatusCode::OK);
   }
 
@@ -323,5 +445,52 @@ mod tests {
       hyper::header::HeaderValue::from_static("chained"),
     );
     assert_eq!(response.inner.headers().get("x-custom").unwrap(), "chained");
+  }
+
+  #[test]
+  fn test_response_builder_json() {
+    #[derive(serde::Serialize)]
+    struct Msg {
+      msg: String,
+    }
+    let response = Response::builder()
+      .status(hyper::StatusCode::CREATED)
+      .json(Msg {
+        msg: "created".into(),
+      });
+    assert_eq!(response.status(), hyper::StatusCode::CREATED);
+  }
+
+  #[test]
+  fn test_response_builder_text() {
+    let response = Response::builder()
+      .status(hyper::StatusCode::NOT_FOUND)
+      .text("not found")
+      .unwrap();
+    assert_eq!(response.status(), hyper::StatusCode::NOT_FOUND);
+  }
+
+  #[test]
+  fn test_response_builder_body() {
+    let response = Response::builder()
+      .status_u16(200)
+      .body("raw body")
+      .unwrap();
+    assert_eq!(response.status(), hyper::StatusCode::OK);
+  }
+
+  #[test]
+  fn test_response_builder_header() {
+    let response = Response::builder()
+      .header(
+        hyper::header::HeaderName::from_static("x-custom"),
+        hyper::header::HeaderValue::from_static("builder-value"),
+      )
+      .text("ok")
+      .unwrap();
+    assert_eq!(
+      response.inner.headers().get("x-custom").unwrap(),
+      "builder-value"
+    );
   }
 }

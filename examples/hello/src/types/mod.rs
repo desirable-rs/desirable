@@ -35,10 +35,10 @@ where
 
 impl<T> IntoResponse for Resp<T>
 where
-  T: Serialize + Send + Sync + 'static,
+  T: Serialize,
 {
   fn into_response(self) -> Result {
-    Response::json::<Resp<T>>(self)
+    Ok(Response::json::<Resp<T>>(self))
   }
 }
 

@@ -185,6 +185,12 @@ impl IntoResponse for crate::Response {
   }
 }
 
+impl IntoResponse for serde_json::Value {
+  fn into_response(self) -> Result {
+    Ok(crate::Response::json(self))
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -239,5 +245,13 @@ mod tests {
     let bytes: Bytes = Bytes::from(vec![1, 2, 3]);
     let response: Result = bytes.into_response();
     assert!(response.is_ok());
+  }
+
+  #[test]
+  fn test_into_response_json_value() {
+    let value = serde_json::json!({"msg": "hello"});
+    let response: Result = value.into_response();
+    assert!(response.is_ok());
+    assert_eq!(response.unwrap().status(), hyper::StatusCode::OK);
   }
 }
