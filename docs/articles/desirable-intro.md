@@ -127,7 +127,7 @@ impl Middleware for Auth {
 app.with(Auth);
 ```
 
-v1.1 内置了两个中间件：
+v1.1 起内置了两个中间件：
 
 - **Logger** — 自动记录 `GET /users/42 → 200 3ms`
 - **Cors** — builder 模式，一行配置 `Cors::new().allow_origin("https://example.com")`
@@ -281,7 +281,7 @@ async fn main() -> Result<()> {
 核心代码：  ~1200 行
 Release 体积：~260KB
 编译时间：  ~8s（M1 Pro，from scratch）
-v1.1 新增：  ~260 行（Logger + CORS + 优雅关闭）
+v1.2 新增：  ~120 行（Builder 模式 + DX 增强）
 ```
 
 ---
@@ -290,7 +290,7 @@ v1.1 新增：  ~260 行（Logger + CORS + 优雅关闭）
 
 ```toml
 [dependencies]
-desirable = "1.1"
+desirable = "1.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
