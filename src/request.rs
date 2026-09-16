@@ -297,6 +297,83 @@ impl Request {
   {
     self.body::<T>().await
   }
+
+  /// Deserializes an `application/x-www-form-urlencoded` request body into type `T`.
+  ///
+  /// Reads the full body and parses it with `serde_urlencoded`. Intended for
+  /// HTML form submissions (`<form method="post">` without `enctype`).
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - A type that implements `serde::DeserializeOwned`
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the body cannot be read or does not deserialize
+  /// into `T`. The Content-Type header is not strictly validated; the body
+  /// is always parsed as urlencoded.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// #[derive(serde::Deserialize)]
+  /// struct Login {
+  ///   username: String,
+  ///   password: String,
+  /// }
+  ///
+  /// async fn login(mut req: Request) -> Result {
+  ///   let form: Login = req.form().await?;
+  ///   Ok(format!("Hi {}", form.username).into())
+  /// }
+  /// ```
+  pub async fn form<T>(&mut self) -> AnyResult<T>
+  where
+    T: serde::de::DeserializeOwned,
+  {
+    let inner = self.inner();
+    let mut body = inner.collect().await?.aggregate();
+    let bytes = body.copy_to_bytes(body.remaining());
+    Ok(serde_urlencoded::from_bytes(&bytes)?)
+  }
+
+  /// Returns the first value of the given request header.
+  ///
+  /// # Arguments
+  ///
+  /// * `name` - The header name (case-insensitive per HTTP semantics)
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// let auth = req.header("Authorization");
+  /// ```
+  pub fn header(&self, name: &str) -> Option<&hyper::header::HeaderValue> {
+    self.inner.headers().get(name)
+  }
+
+  /// Returns the cookie with the given name from the request's `Cookie` header.
+  ///
+  /// # Arguments
+  ///
+  /// * `name` - The cookie name
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// if let Some(theme) = req.cookie("theme") {
+  ///   println!("theme = {}", theme.value());
+  /// }
+  /// ```
+  pub fn cookie(&self, name: &str) -> Option<cookie::Cookie<'static>> {
+    let header = self.inner.headers().get(hyper::header::COOKIE)?;
+    let header = header.to_str().ok()?;
+    header
+      .split(';')
+      .filter_map(|part| cookie::Cookie::parse(part.trim()).ok())
+      .find(|c| c.name() == name)
+      .map(|c| c.into_owned())
+  }
 }
 
 impl From<HyperRequest> for Request {

@@ -12,6 +12,10 @@ static CONTENT_TYPE_JSON: header::HeaderValue =
 static CONTENT_TYPE_TEXT: header::HeaderValue =
   header::HeaderValue::from_static("text/plain; charset=utf-8");
 
+/// Cached content-type header value for HTML responses.
+static CONTENT_TYPE_HTML: header::HeaderValue =
+  header::HeaderValue::from_static("text/html; charset=utf-8");
+
 /// Cached content-type header value for octet-stream responses.
 /// Currently unused but kept for potential future byte-based responses.
 #[allow(dead_code)]
@@ -137,6 +141,25 @@ impl Response {
     hyper::http::Response::builder()
       .header(header::CONTENT_TYPE, CONTENT_TYPE_JSON.clone())
       .body(Full::new(Bytes::from(data)))
+      .unwrap()
+      .into()
+  }
+
+  /// Creates an HTML response with the given body.
+  ///
+  /// # Arguments
+  ///
+  /// * `body` - The HTML document as a string
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// Response::html("<h1>Hello</h1>")
+  /// ```
+  pub fn html(body: impl Into<String>) -> Self {
+    hyper::http::Response::builder()
+      .header(header::CONTENT_TYPE, CONTENT_TYPE_HTML.clone())
+      .body(Full::new(Bytes::from(body.into())))
       .unwrap()
       .into()
   }
@@ -491,6 +514,16 @@ mod tests {
     assert_eq!(
       response.inner.headers().get("x-custom").unwrap(),
       "builder-value"
+    );
+  }
+
+  #[test]
+  fn test_response_html() {
+    let response = Response::html("<h1>Hello</h1>");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+      response.inner.headers().get(header::CONTENT_TYPE).unwrap(),
+      "text/html; charset=utf-8"
     );
   }
 }
