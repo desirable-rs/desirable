@@ -111,6 +111,20 @@ impl Endpoint for ServeFile {
   }
 }
 
+/// Returns the file to serve: `path` itself, or `path/index.html` when the
+/// path resolves to a directory (directory-index fallback).
+async fn with_dir_index(path: PathBuf) -> PathBuf {
+  if tokio::fs::metadata(&path)
+    .await
+    .map(|m| m.is_dir())
+    .unwrap_or(false)
+  {
+    path.join("index.html")
+  } else {
+    path
+  }
+}
+
 /// Endpoint for serving files from a directory.
 ///
 /// Extracts a `:file` parameter from the URL and serves the corresponding
@@ -119,6 +133,12 @@ impl Endpoint for ServeFile {
 /// # Path Parameters
 ///
 /// * `file` - The relative path of the file within the directory
+///
+/// # Directory Index
+///
+/// When the resolved path is a directory, `index.html` inside it is served
+/// instead. An empty `:file` parameter therefore serves the directory's
+/// `index.html`.
 ///
 /// # Security
 ///
@@ -179,6 +199,7 @@ impl Endpoint for ServeDir {
       Some(path) => path,
       None => return Response::with_status(403, "Forbidden".to_string()),
     };
+    let resolved = with_dir_index(resolved).await;
     let body = tokio::fs::read(resolved.clone()).await?;
     let mime = mime_for_path(&resolved);
     let response = hyper::Response::builder()
@@ -262,5 +283,25 @@ mod tests {
     let base = PathBuf::from("/var/www/static");
     // On unix, "/etc/passwd" has a RootDir component and must be rejected.
     assert!(resolve_within(&base, "/etc/passwd").is_none());
+  }
+
+  #[tokio::test]
+  async fn test_with_dir_index_serves_index_html_for_directories() {
+    let base = std::env::temp_dir().join(format!("desirable-dir-index-{}", std::process::id()));
+    let subdir = base.join("site");
+    std::fs::create_dir_all(&subdir).unwrap();
+    std::fs::write(subdir.join("index.html"), "<h1>hi</h1>").unwrap();
+
+    // A directory resolves to its index.html.
+    let resolved = with_dir_index(subdir.clone()).await;
+    assert_eq!(resolved, subdir.join("index.html"));
+
+    // A file stays as-is.
+    let file_path = base.join("app.js");
+    std::fs::write(&file_path, b"console.log(1)").unwrap();
+    let resolved = with_dir_index(file_path.clone()).await;
+    assert_eq!(resolved, file_path);
+
+    std::fs::remove_dir_all(&base).ok();
   }
 }
