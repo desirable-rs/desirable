@@ -1,4 +1,4 @@
-use crate::{DynEndpoint, Endpoint, IntoResponse, Middleware, Next, Request, Result};
+use crate::{DynEndpoint, Endpoint, IntoResponse, Middleware, Next, Request, Response, Result};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -30,10 +30,37 @@ pub struct Router {
   pub routes: HashMap<hyper::Method, route_recognizer::Router<Box<DynEndpoint>>>,
   /// Handler for unmatched routes
   pub not_found_handler: Box<DynEndpoint>,
+  /// Handler for paths that exist under other methods
+  pub method_not_allowed_handler: Box<DynEndpoint>,
 }
 
+/// Extension carrying the HTTP methods that can serve the matched path.
+///
+/// Inserted by [`Router::dispatch`] before the method-not-allowed handler runs.
+#[derive(Debug, Clone)]
+pub struct AllowedMethods(pub Vec<hyper::Method>);
+
 async fn default_handler(_req: Request) -> impl IntoResponse {
-  "handle not found"
+  (hyper::StatusCode::NOT_FOUND, "not found")
+}
+
+async fn default_method_not_allowed_handler(req: Request) -> Response {
+  let allow = req
+    .extensions()
+    .get::<AllowedMethods>()
+    .map(|a| a.0.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", "))
+    .unwrap_or_default();
+  let mut response = Response::builder()
+    .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+    .text("method not allowed")
+    .expect("static 405 response cannot fail to build");
+  if !allow.is_empty() {
+    response.set_header(
+      hyper::header::ALLOW,
+      hyper::header::HeaderValue::from_str(&allow).expect("method names are valid header values"),
+    );
+  }
+  response
 }
 
 impl Default for Router {
@@ -54,6 +81,7 @@ impl Router {
       middlewares: Vec::new(),
       routes: HashMap::new(),
       not_found_handler: Box::new(default_handler),
+      method_not_allowed_handler: Box::new(default_method_not_allowed_handler),
     }
   }
 
@@ -233,19 +261,29 @@ impl Router {
   ///
   /// The response from the matched handler or an error
   pub async fn dispatch(&self, mut req: Request, remote_addr: Arc<SocketAddr>) -> Result {
-    let method = req.method();
-    let path = req.uri().path();
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
 
     let mut params = route_recognizer::Params::new();
-    let endpoint = match self.routes.get(method) {
-      Some(route) => match route.recognize(path) {
-        Ok(m) => {
-          m.params().clone_into(&mut params);
-          &***m.handler()
-        }
-        Err(_e) => &*self.not_found_handler,
-      },
-      None => &*self.not_found_handler,
+
+    let matched = self
+      .routes
+      .get(&method)
+      .and_then(|route| route.recognize(&path).ok());
+
+    let endpoint: &DynEndpoint = if let Some(m) = matched {
+      m.params().clone_into(&mut params);
+      &***m.handler()
+    } else {
+      // No route for this method. If the path exists under other methods,
+      // respond 405 Method Not Allowed; otherwise fall back to 404.
+      let methods = self.matching_methods(&path);
+      if methods.is_empty() {
+        &*self.not_found_handler
+      } else {
+        req.extensions_mut().insert(AllowedMethods(methods));
+        &*self.method_not_allowed_handler
+      }
     };
 
     req.params = params;
@@ -255,6 +293,19 @@ impl Router {
       middlewares: &self.middlewares,
     };
     next.run(req).await
+  }
+
+  /// Returns the HTTP methods whose route tables contain a match for `path`,
+  /// sorted for a stable `Allow` header.
+  fn matching_methods(&self, path: &str) -> Vec<hyper::Method> {
+    let mut methods: Vec<hyper::Method> = self
+      .routes
+      .iter()
+      .filter(|(_, route)| route.recognize(path).is_ok())
+      .map(|(method, _)| method.clone())
+      .collect();
+    methods.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    methods
   }
 }
 
