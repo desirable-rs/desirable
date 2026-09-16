@@ -1,4 +1,6 @@
 use crate::{DynEndpoint, Endpoint, IntoResponse, Middleware, Next, Request, Response, Result};
+use bytes::Bytes;
+use http_body_util::Full;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,10 +26,19 @@ use std::sync::Arc;
 pub struct Router {
   /// Optional path prefix for all routes in this router
   pub prefix: Option<String>,
-  /// Middleware stack applied to all routes
+  /// Middleware stack applied to routes registered after it was added.
+  ///
+  /// Middleware is order-dependent (like axum's `layer`): call [`Router::with`]
+  /// before registering the routes it should apply to.
   pub middlewares: Vec<Arc<dyn Middleware>>,
-  /// Route mappings keyed by HTTP method
-  pub routes: HashMap<hyper::Method, route_recognizer::Router<Box<DynEndpoint>>>,
+  /// Snapshot of the middleware stack, shared with scoped endpoints.
+  middlewares_arc: Arc<Vec<Arc<dyn Middleware>>>,
+  /// Route tables keyed by HTTP method.
+  ///
+  /// Each method holds a *list* of tables: [`Router::merge`] appends the
+  /// target's tables instead of replacing them, so routes registered on both
+  /// routers survive a merge.
+  pub routes: HashMap<hyper::Method, Vec<route_recognizer::Router<Box<DynEndpoint>>>>,
   /// Handler for unmatched routes
   pub not_found_handler: Box<DynEndpoint>,
   /// Handler for paths that exist under other methods
@@ -39,6 +50,26 @@ pub struct Router {
 /// Inserted by [`Router::dispatch`] before the method-not-allowed handler runs.
 #[derive(Debug, Clone)]
 pub struct AllowedMethods(pub Vec<hyper::Method>);
+
+/// An endpoint bundled with the middleware chain captured when it was
+/// registered. This is how per-router middleware survives [`Router::merge`]:
+/// each route carries its own chain instead of relying on router-level state.
+struct ScopedEndpoint {
+  endpoint: Box<DynEndpoint>,
+  middlewares: Arc<Vec<Arc<dyn Middleware>>>,
+}
+
+#[async_trait::async_trait]
+impl Endpoint for ScopedEndpoint {
+  async fn call(&self, req: Request) -> Result {
+    Next {
+      endpoint: &*self.endpoint,
+      middlewares: &self.middlewares,
+    }
+    .run(req)
+    .await
+  }
+}
 
 async fn default_handler(_req: Request) -> impl IntoResponse {
   (hyper::StatusCode::NOT_FOUND, "not found")
@@ -85,10 +116,35 @@ impl Router {
     Router {
       prefix: None,
       middlewares: Vec::new(),
+      middlewares_arc: Arc::new(Vec::new()),
       routes: HashMap::new(),
       not_found_handler: Box::new(default_handler),
       method_not_allowed_handler: Box::new(default_method_not_allowed_handler),
     }
+  }
+
+  /// Sets the path prefix for all routes registered on this router.
+  ///
+  /// Routes are prefixed at registration time, so call this before adding
+  /// routes. Combined with [`Router::merge`], this enables nesting:
+  ///
+  /// ```rust,ignore
+  /// let api = Router::new()
+  ///     .prefix("/api")
+  ///     .with(Auth);              // scoped to these routes
+  /// api.get("/users", list_users); // served at /api/users
+  ///
+  /// let mut app = Router::new();
+  /// app.merge(api);                // middleware is preserved
+  /// ```
+  #[must_use]
+  pub fn prefix(mut self, prefix: &str) -> Self {
+    let mut prefix = prefix.trim_end_matches('/').to_string();
+    if !prefix.is_empty() && !prefix.starts_with('/') {
+      prefix.insert(0, '/');
+    }
+    self.prefix = if prefix.is_empty() { None } else { Some(prefix) };
+    self
   }
 
   /// Adds a route for the specified HTTP method.
@@ -109,11 +165,15 @@ impl Router {
       Some(prefix) => format!("{}{}", prefix, route),
       None => route.to_string(),
     };
-    self
-      .routes
-      .entry(method)
-      .or_default()
-      .add(&path, Box::new(dest));
+    let scoped = ScopedEndpoint {
+      endpoint: Box::new(dest),
+      middlewares: Arc::clone(&self.middlewares_arc),
+    };
+    let tables = self.routes.entry(method).or_default();
+    if tables.is_empty() {
+      tables.push(route_recognizer::Router::new());
+    }
+    tables.last_mut().unwrap().add(&path, Box::new(scoped));
   }
 
   /// Adds a GET route.
@@ -215,9 +275,13 @@ impl Router {
     self.at(hyper::Method::CONNECT, route, dest);
   }
 
-  /// Adds middleware to the router.
+  /// Adds middleware to routes registered after this call.
   ///
-  /// Middleware is executed before the route handler for all routes in this router.
+  /// Middleware is order-dependent (like axum's `layer`): it applies to the
+  /// routes added after [`Router::with`], and it travels with those routes
+  /// through [`Router::merge`]. Call `with` before registering routes.
+  ///
+  /// The built-in 404/405 fallbacks always run the full middleware stack.
   ///
   /// # Arguments
   ///
@@ -237,21 +301,35 @@ impl Router {
   /// }
   ///
   /// router.with(Logger);
+  /// router.get("/", || async { "logged" });
   /// ```
   pub fn with(&mut self, middleware: impl Middleware) {
     self.middlewares.push(Arc::new(middleware));
+    self.middlewares_arc = Arc::new(self.middlewares.clone());
   }
 
   /// Merges another router's routes into this router.
   ///
-  /// The routes from the target router are added to this router's routes.
-  /// Middleware is not merged.
+  /// Routes from `target` keep the middleware that was registered on it
+  /// before its routes (see [`Router::with`]), so nesting works:
+  ///
+  /// ```rust,ignore
+  /// let api = Router::new().prefix("/api").with(Auth);
+  /// api.get("/users", list_users);
+  ///
+  /// app.merge(api); // /api/users runs Auth
+  /// ```
+  ///
+  /// The target's not-found and method-not-allowed handlers are discarded;
+  /// this router's fallbacks remain in charge.
   ///
   /// # Arguments
   ///
   /// * `target` - The router whose routes to merge
   pub fn merge(&mut self, target: Router) {
-    self.routes.extend(target.routes);
+    for (method, tables) in target.routes {
+      self.routes.entry(method).or_default().extend(tables);
+    }
   }
 
   /// Dispatches a request to the appropriate handler.
@@ -272,33 +350,48 @@ impl Router {
 
     let mut params = route_recognizer::Params::new();
 
+    // HEAD falls back to the GET route table; the body is stripped below.
+    let is_head = method == hyper::Method::HEAD;
+    let lookup_method = if is_head { &hyper::Method::GET } else { &method };
+
+    // Fallback handlers run inside the router-level middleware chain; matched
+    // routes carry their own (scoped) chain captured at registration.
+    let not_found: &DynEndpoint = &*self.not_found_handler;
+    let not_allowed: &DynEndpoint = &*self.method_not_allowed_handler;
+
     let matched = self
       .routes
-      .get(&method)
-      .and_then(|route| route.recognize(&path).ok());
+      .get(lookup_method)
+      .and_then(|tables| tables.iter().find_map(|table| table.recognize(&path).ok()));
 
-    let endpoint: &DynEndpoint = if let Some(m) = matched {
+    let (endpoint, middlewares): (&DynEndpoint, &[Arc<dyn Middleware>]) = if let Some(m) = matched
+    {
       m.params().clone_into(&mut params);
-      &***m.handler()
+      (&***m.handler(), &[])
     } else {
       // No route for this method. If the path exists under other methods,
       // respond 405 Method Not Allowed; otherwise fall back to 404.
       let methods = self.matching_methods(&path);
       if methods.is_empty() {
-        &*self.not_found_handler
+        (not_found, &self.middlewares)
       } else {
         req.extensions_mut().insert(AllowedMethods(methods));
-        &*self.method_not_allowed_handler
+        (not_allowed, &self.middlewares)
       }
     };
 
     req.params = params;
     req.remote_addr = Some(remote_addr);
-    let next = Next {
-      endpoint,
-      middlewares: &self.middlewares,
-    };
-    next.run(req).await
+    let mut response = Next { endpoint, middlewares }.run(req).await;
+
+    // Per HTTP semantics, HEAD responses carry no body.
+    if is_head {
+      if let Ok(res) = &mut response {
+        *res.inner.body_mut() = Full::new(Bytes::new());
+      }
+    }
+
+    response
   }
 
   /// Returns the HTTP methods whose route tables contain a match for `path`,
@@ -307,7 +400,7 @@ impl Router {
     let mut methods: Vec<hyper::Method> = self
       .routes
       .iter()
-      .filter(|(_, route)| route.recognize(path).is_ok())
+      .filter(|(_, tables)| tables.iter().any(|table| table.recognize(path).is_ok()))
       .map(|(method, _)| method.clone())
       .collect();
     methods.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -392,5 +485,50 @@ mod tests {
 
     // Both routes should be accessible
     assert!(router1.routes.contains_key(&hyper::Method::GET));
+  }
+
+  #[test]
+  fn test_prefix_builder_normalization() {
+    assert_eq!(Router::new().prefix("/api").prefix, Some("/api".to_string()));
+    assert_eq!(Router::new().prefix("/api/").prefix, Some("/api".to_string()));
+    assert_eq!(Router::new().prefix("api").prefix, Some("/api".to_string()));
+    assert_eq!(Router::new().prefix("/").prefix, None);
+    assert_eq!(Router::new().prefix("").prefix, None);
+  }
+
+  #[test]
+  fn test_prefix_baked_into_routes() {
+    let mut api = Router::new().prefix("/api");
+    api.get("/users", |_| async { "users" });
+    let tables = api.routes.get(&hyper::Method::GET).unwrap();
+    assert!(tables.iter().any(|t| t.recognize("/api/users").is_ok()));
+    assert!(tables.iter().all(|t| t.recognize("/users").is_err()));
+  }
+
+  #[test]
+  fn test_merge_preserves_scoped_middleware() {
+    use crate::Next;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    struct Tag;
+    #[async_trait::async_trait]
+    impl crate::Middleware for Tag {
+      async fn handle(&self, req: Request, next: Next<'_>) -> Result {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        next.run(req).await
+      }
+    }
+
+    let mut api = Router::new().prefix("/api");
+    api.with(Tag);
+    api.get("/ping", |_| async { "pong" });
+
+    let mut app = Router::new();
+    app.merge(api);
+
+    // Scoped middleware survived the merge: chain captured on the endpoint.
+    let tables = app.routes.get(&hyper::Method::GET).unwrap();
+    assert!(tables.iter().any(|t| t.recognize("/api/ping").is_ok()));
   }
 }
