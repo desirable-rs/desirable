@@ -48,7 +48,13 @@ async fn default_method_not_allowed_handler(req: Request) -> Response {
   let allow = req
     .extensions()
     .get::<AllowedMethods>()
-    .map(|a| a.0.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", "))
+    .map(|a| {
+      a.0
+        .iter()
+        .map(|m| m.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+    })
     .unwrap_or_default();
   let mut response = Response::builder()
     .status(hyper::StatusCode::METHOD_NOT_ALLOWED)

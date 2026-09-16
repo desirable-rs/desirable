@@ -54,13 +54,11 @@ impl Middleware for RequestId {
 
     let mut response = next.run(req).await;
 
-    if let Ok(res) = &mut response {
-      if let Ok(value) = hyper::header::HeaderValue::from_str(&id) {
-        res.inner.headers_mut().insert(
-          hyper::header::HeaderName::from_static(REQUEST_ID_HEADER),
-          value,
-        );
-      }
+    if let (Ok(res), Ok(value)) = (&mut response, hyper::header::HeaderValue::from_str(&id)) {
+      res.inner.headers_mut().insert(
+        hyper::header::HeaderName::from_static(REQUEST_ID_HEADER),
+        value,
+      );
     }
 
     response

@@ -192,12 +192,6 @@ impl Endpoint for ServeDir {
 mod tests {
   use super::*;
 
-  fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("desirable-fs-test-{}-{}", name, std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-  }
-
   #[test]
   fn test_serve_file_new() {
     let path = PathBuf::from("/var/www/index.html");
@@ -214,15 +208,27 @@ mod tests {
 
   #[test]
   fn test_mime_for_path() {
-    assert_eq!(mime_for_path(Path::new("a.html")), "text/html; charset=utf-8");
+    assert_eq!(
+      mime_for_path(Path::new("a.html")),
+      "text/html; charset=utf-8"
+    );
     assert_eq!(mime_for_path(Path::new("a.CSS")), "text/css; charset=utf-8");
-    assert_eq!(mime_for_path(Path::new("a.js")), "text/javascript; charset=utf-8");
+    assert_eq!(
+      mime_for_path(Path::new("a.js")),
+      "text/javascript; charset=utf-8"
+    );
     assert_eq!(mime_for_path(Path::new("a.json")), "application/json");
     assert_eq!(mime_for_path(Path::new("a.png")), "image/png");
     assert_eq!(mime_for_path(Path::new("a.SVG")), "image/svg+xml");
     assert_eq!(mime_for_path(Path::new("a.woff2")), "font/woff2");
-    assert_eq!(mime_for_path(Path::new("a.unknownext")), "application/octet-stream");
-    assert_eq!(mime_for_path(Path::new("noext")), "application/octet-stream");
+    assert_eq!(
+      mime_for_path(Path::new("a.unknownext")),
+      "application/octet-stream"
+    );
+    assert_eq!(
+      mime_for_path(Path::new("noext")),
+      "application/octet-stream"
+    );
   }
 
   #[test]

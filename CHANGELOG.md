@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2026-07-25
+
+### Fixed
+
+- **Path traversal in `ServeDir`** (security). A `:file` parameter containing
+  `..` or absolute components (e.g. `/assets/../../etc/passwd`) could read
+  arbitrary files. Such requests now receive `403 Forbidden`.
+- **Default 404 responses returned HTTP 200.** The built-in not-found handler
+  now returns `404 Not Found` with a plain-text body.
+- **Method mismatch returned 404 instead of 405.** When a path exists under
+  other HTTP methods, the router now responds `405 Method Not Allowed` with
+  an `Allow: GET, POST, ...` header listing the supported methods.
+- **ServeFile/ServeDir never set Content-Type** despite the docs claiming it.
+  The type is now inferred from the file extension (html, css, js, json,
+  images, fonts, media); unknown extensions fall back to
+  `application/octet-stream`.
+
+### Added
+
+- **`Request::form::<T>()`** parses `application/x-www-form-urlencoded`
+  request bodies into any `DeserializeOwned` type.
+- **`Request::header(name)`** reads a single request header.
+- **`Request::cookie(name)`** parses a named cookie from the `Cookie` header.
+- **`Response::html()`** constructs a response with
+  `Content-Type: text/html; charset=utf-8`.
+- **`RequestId` middleware** — reuses the inbound `X-Request-Id` header or
+  generates a random 32-char hex ID, stores it in request extensions as
+  `RequestIdValue`, and echoes it on the response.
+
+---
+
 ## [1.2.0] - 2026-07-25
 
 ### Changed
@@ -77,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[1.3.0]: https://github.com/desirable-rs/desirable/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/desirable-rs/desirable/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/desirable-rs/desirable/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/desirable-rs/desirable/compare/v1.0.0...v1.0.1
