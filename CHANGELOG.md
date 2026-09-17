@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.0] - 2026-07-25
+
+### Added
+
+- **Connection draining on shutdown.** On shutdown the server stops accepting,
+  tells each in-flight connection to finish its current request (hyper's
+  `graceful_shutdown`), and waits up to `Server::drain_timeout` (default 10s,
+  configurable) before exiting. Previously in-flight connections were cut
+  off abruptly.
+- **`Server::try_bind(addr) -> Result<Server>`** parses the address without
+  panicking; `bind()` keeps its existing panic behavior.
+- **`Server::run_with_shutdown(router, signal)`** makes shutdown programmable
+  — trigger it from tests, orchestration, or custom signals. `run_graceful`
+  now delegates to it with a Ctrl+C future.
+- **`TCP_NODELAY` is enabled** on accepted connections.
+- **Static files support conditional requests.** `ServeFile`/`ServeDir`
+  responses carry a weak `ETag` (`W/"{mtime:x}-{size:x}"`) and `Last-Modified`;
+  matching `If-None-Match` or `If-Modified-Since` requests receive
+  `304 Not Modified` with an empty body.
+
+### Changed
+
+- New dependencies `httpdate` and `tokio-util` (`rt` feature) — both were
+  already present in the dependency graph transitively, so the lockfile does
+  not grow.
+
+---
+
 ## [1.4.0] - 2026-07-25
 
 ### Fixed
@@ -143,6 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[1.5.0]: https://github.com/desirable-rs/desirable/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/desirable-rs/desirable/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/desirable-rs/desirable/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/desirable-rs/desirable/compare/v1.1.0...v1.2.0

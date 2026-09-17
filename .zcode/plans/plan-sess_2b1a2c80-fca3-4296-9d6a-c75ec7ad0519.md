@@ -1,33 +1,29 @@
-## desirable v1.4.0 — 路由嵌套、HEAD 回退、目录索引、Cookie API、超时
+## desirable v1.5.0 — 连接排空、Server API、静态文件缓存
 
-### 1. Router::prefix() + merge() 中间件修复
-- 新增 `Router::prefix(&str) -> Self` builder 方法（设置已有 prefix 字段）
-- 重写 `merge()`：将目标路由器的中间件链包装进其每个 endpoint（新建内部 `WrappedEndpoint`，`call` 内通过 `Next` 执行链），不再丢弃中间件
-- 用法：`app.merge(Router::new().prefix("/api").with(Auth))` 实现嵌套
+### 1. 真正的优雅关闭（连接排空）
+- accept_loop 中每个连接任务持有 `watch::Receiver<bool>`，任务内 `tokio::select!`：
+  连接完成 vs 关闭信号。信号触发时 `conn.as_mut().graceful_shutdown()` 后继续 poll 排空
+- 用 `tokio_util::task::TaskTracker` 跟踪所有连接任务；shutdown 后 `close()` + `wait().await`（带默认 10s 排空超时，用 tokio::time::timeout 包裹）
+- `run_graceful` = `run_with_shutdown(router, ctrl_c)`
 
-### 2. HEAD 请求自动回退 GET
-- dispatch 中：`HEAD` 未命中 HEAD 路由时改查 GET 路由表
-- 命中 GET 则执行并将响应 body 置空（Full<Bytes> 换为空）
-- 405 判定相应调整：HEAD 存在 GET 路由即视为允许
+### 2. Server API 补全
+- `Server::try_bind(&str) -> Result<Server>`（不 panic）；`bind()` 保持现有 panic 语义
+- `run_with_shutdown(router, impl Future<Output=()> + Send + 'static)` 新方法
+- accept 后 `stream.set_nodelay(true)`（失败仅记录不影响服务）
 
-### 3. ServeDir 目录索引
-- `:file` 解析后若是目录（或为空串），追加尝试 `index.html`
-- 用 `tokio::fs::metadata` 判断目录
+### 3. 静态文件缓存
+- fs.rs 提取共享异步助手 `serve_file_with_cache(path, req)`：
+  读取 metadata（mtime+size）→ 生成弱 ETag `W/"{mtime_secs:x}-{size:x}"` 与 Last-Modified（httpdate 格式化）
+  → If-None-Match 命中或 If-Modified-Since 不早于 mtime → 返回 304（带 ETag/Last-Modified，无 body）
+  → 否则 200 全量响应
+- ServeFile 与 ServeDir 的 call() 统一走该助手（消除重复）
+- `httpdate = "^1"` 加入直接依赖（已在 Cargo.lock，零新增）
 
-### 4. Response Cookie API 与头语义修复
-- `Response::headers_mut() -> &HeaderMap` 公共访问器
-- `append_header(name, value)`（append 语义，不覆盖）
-- `set_cookie(Cookie)`：append 到 SET-COOKIE，支持多个
-- `remove_cookie(name)`：附加 max-age=0 的删除 cookie
-- 保留现有 `set_header`（insert 语义）不变，不破坏兼容
-
-### 5. Timeout 中间件（新增 src/middleware/timeout.rs）
-- `Timeout::new(Duration)`，`tokio::time::timeout` 包装 `next.run()`
-- 超时返回 `408 Request Timeout`
-- mod.rs 与 lib.rs 补 re-export
+### 4. 测试
+- tests/nesting.rs：spawn_server 返回 (addr, JoinHandle)，等待就绪改为轮询 connect 而非固定 sleep
+- 新 e2e 测试：静态文件 304（先 200 拿 ETag，再带 If-None-Match 请求断言 304）
+- 新 e2e 测试：run_with_shutdown 触发后 server 任务正常返回 Ok
 
 ### 交付
-- 文件：router.rs、fs.rs、response.rs、middleware/{mod,timeout}.rs、lib.rs、Cargo.toml(1.4.0)、CHANGELOG.md
-- 每项带单元测试（HEAD 回退、merge 中间件、index.html、cookie、timeout 触发）
-- 全量验证：test + clippy -D warnings + fmt + examples
-- 零新依赖，~300 行，无破坏性 API 变更
+- 文件：src/server.rs、src/fs.rs、src/lib.rs（如需 re-export）、Cargo.toml(1.5.0)、tests/nesting.rs、CHANGELOG.md
+- 全量验证 test/clippy/fmt/examples；锁文件零新增 crate；无破坏性 API

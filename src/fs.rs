@@ -150,20 +150,17 @@ async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
 fn is_not_modified(req: &Request, etag: &str, modified: SystemTime) -> bool {
   // If-None-Match takes precedence over If-Modified-Since.
   if let Some(inm) = req.header("if-none-match").and_then(|v| v.to_str().ok()) {
-    return inm
-      .split(',')
-      .any(|candidate| {
-        let candidate = candidate.trim();
-        candidate == "*" || candidate == etag || candidate == etag.trim_start_matches("W/")
-      });
+    return inm.split(',').any(|candidate| {
+      let candidate = candidate.trim();
+      candidate == "*" || candidate == etag || candidate == etag.trim_start_matches("W/")
+    });
   }
   if let Some(ims) = req
     .header("if-modified-since")
     .and_then(|v| v.to_str().ok())
+    && let Ok(since) = httpdate::parse_http_date(ims)
   {
-    if let Ok(since) = httpdate::parse_http_date(ims) {
-      return modified <= since;
-    }
+    return modified <= since;
   }
   false
 }
