@@ -49,7 +49,9 @@ pub use error::{Error, error_msg, invalid_param, missing_param, set_error_handle
 pub use fs::{ServeDir, ServeFile};
 pub use into_response::IntoResponse;
 pub use kernel::{DynEndpoint, Endpoint, Middleware, Next};
-pub use middleware::{BodyLimit, Logger, RateLimit, RequestId, RequestIdValue, Timeout};
+pub use middleware::{
+  BodyLimit, Logger, RateLimit, RequestId, RequestIdValue, SessionHandle, SessionLayer, Timeout,
+};
 pub use request::Request;
 pub use response::Response;
 pub use router::Router;

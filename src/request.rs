@@ -9,6 +9,7 @@ use route_recognizer::Params;
 use std::any::Any;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tracing::debug;
 
 /// The HTTP request type for the desirable framework.
 ///
@@ -428,6 +429,35 @@ impl Request {
       .extensions()
       .get::<Arc<dyn Any + Send + Sync>>()?;
     Arc::clone(state).downcast::<T>().ok()
+  }
+
+  /// Returns the request's session, loaded by the
+  /// [`SessionLayer`](crate::SessionLayer) middleware.
+  ///
+  /// Dereferences to [`Mutex`](std::sync::Mutex)`<Session>`; modifications
+  /// are persisted via `Set-Cookie` automatically when the response returns
+  /// — and only when the session was actually modified.
+  ///
+  /// When [`SessionLayer`](crate::SessionLayer) is not installed, returns a
+  /// detached session whose changes are discarded (a debug-level log notes
+  /// it).
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// req.session().lock().unwrap().insert("user_id", 42)?;
+  /// let uid: Option<i32> = req.session().lock().unwrap().get("user_id")?;
+  /// ```
+  pub fn session(&self) -> crate::middleware::session::SessionHandle {
+    use crate::middleware::session::SessionHandle;
+    use crate::session::{Session, SessionData};
+
+    if let Some(handle) = self.inner.extensions().get::<SessionHandle>() {
+      handle.clone()
+    } else {
+      debug!("SessionLayer is not installed; session changes will be discarded");
+      SessionHandle::new(Session::new(SessionData::new()))
+    }
   }
 }
 
