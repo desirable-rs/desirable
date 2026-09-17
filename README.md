@@ -2,63 +2,114 @@
 
 > desirable is a minimal and pragmatic Rust web application framework.
 
-## Example
+[![Crates.io](https://img.shields.io/crates/v/desirable.svg)](https://crates.io/crates/desirable)
+[![Documentation](https://docs.rs/desirable/badge.svg)](https://docs.rs/desirable)
+[![Build](https://github.com/desirable-rs/desirable/actions/workflows/rust.yml/badge.svg)](https://github.com/desirable-rs/desirable/actions)
+[![License](https://img.shields.io/crates/l/desirable.svg)](https://github.com/desirable-rs/desirable#license)
 
-[examples](https://github.com/desirable-rs/desirable/tree/main/examples)
+Built on [hyper](https://github.com/hyperium/hyper) and [tokio](https://github.com/tokio-rs/tokio), desirable keeps the concepts you already know — plain functions as handlers, one-line middleware, typed state — and skips the rest. No macros, no extractor generics, no tower ecosystem required.
 
-```rust
-mod config;
-mod controller;
-mod error;
-mod middleware;
-mod model;
-mod service;
-mod types;
-use config::ENV_NAME;
-use desirable::{ServeDir, ServeFile};
-use std::env;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
-#[tokio::main]
-async fn main() -> desirable::Result<()> {
-  let subscriber = FmtSubscriber::builder()
-    .with_max_level(Level::INFO)
-    .finish();
-  tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-  let arguments: Vec<String> = env::args().collect();
-  let env_name = arguments.get(1).expect("env name must be provided");
-  let env_file = format!("env/{}.env", env_name);
-  dotenv::from_filename(env_file).ok();
+## Quick start
 
-  info!("ENV_NAME: {}", ENV_NAME.to_string());
-  let mut app = desirable::Router::new();
-  app.with(middleware::Logger);
-  app.get("/", ServeFile::new("dist/index.html".into()));
-  app.get("/assets/:file", ServeDir::new("dist/assets".into()));
-  app.get("/hello", controller::hello);
-  app.get("/error", controller::error);
-  app.get("/user", controller::get_users);
-  app.get("/query", controller::get_query);
-  app.get("/user/:id", controller::get_user_by_id);
-  app.post("/user", controller::create_users);
-
-  let addr = "127.0.0.1:1337";
-  let serve = desirable::new(addr);
-  serve.run(app).await?;
-  info!("hello");
-  Ok(())
-}
-
+```toml
+[dependencies]
+desirable = "1.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
 ```
 
-### This framework mainly refers to the following articles and projects
+```rust
+use desirable::{Router, Request, Result};
 
-[tinyweb](https://github.com/zzzdong/tinyweb)
+#[derive(serde::Serialize)]
+struct User { id: i32, name: String }
 
-[axum](https://github.com/tokio-rs/axum)
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut app = Router::new().with_state(vec![
+        User { id: 1, name: "Alice".into() },
+    ]);
 
-[tide](https://github.com/http-rs/tide)
+    app.get("/", |_| async { "Hello, World!" });
+    app.get("/users/:id", |req: Request| async move {
+        let users = req.state::<Vec<User>>().unwrap();
+        let id: i32 = req.param("id").unwrap_or(1);
+        let user = &users[id as usize - 1];
+        desirable::Response::json(user)
+    });
 
-[axum](https://github.com/tokio-rs/axum)
+    desirable::new("127.0.0.1:3000").run(app).await
+}
+```
 
-[基于 hyper 构建一个 Web 框架](https://zhuanlan.zhihu.com/p/164920970)
+## Highlights
+
+**Routing** — path parameters, all HTTP methods, trailing-slash tolerance, correct `404`/`405 + Allow` semantics:
+
+```rust,ignore
+app.get("/users/:id", handler);        // GET /users/42 → 200
+app.post("/users", handler);           // GET /users/   → 200 (trailing slash tolerated)
+                                       // DELETE /users → 405 + Allow: GET
+```
+
+**Built-in middleware** — one line each, zero extra dependencies:
+
+```rust,ignore
+app.with(desirable::Logger);                    // GET /users → 200 3ms (tracing)
+app.with(desirable::Cors::new());               // CORS, builder-configurable
+app.with(desirable::Timeout::new(Duration::from_secs(30)));   // → 408
+app.with(desirable::BodyLimit::new(1024 * 1024));             // → 413
+app.with(desirable::RateLimit::per_second(100));              // → 429 + Retry-After
+app.with(desirable::RequestId);                  // X-Request-Id on every response
+```
+
+**Typed state** — share DB pools and config without generics:
+
+```rust,ignore
+let app = Router::new().with_state(DbPool::new());
+// in handlers:
+let db = req.state::<DbPool>()?;
+```
+
+**Static files** — `ServeFile` / `ServeDir` with extension-based `Content-Type`, directory `index.html` fallback, path-traversal protection, and conditional-request support (`ETag`, `Last-Modified`, `304 Not Modified`).
+
+**Sessions** — HMAC-SHA256 signed cookies with a full builder (`SessionConfig::new(key).secure(true).max_age_secs(86400)`).
+
+**Sensible errors** — client mistakes map to `400`, oversized bodies to `413`; `5xx` bodies never leak internals (they're logged instead). Render all errors your way with `set_error_handler(|err| ...)`.
+
+**Graceful shutdown** — Ctrl+C **and** SIGTERM stop the accept loop, let in-flight requests finish (configurable drain timeout, default 10s), then exit.
+
+```rust,ignore
+server.run(app).await?;                    // graceful on Ctrl+C / SIGTERM
+server.run_with_shutdown(app, my_signal).await?;   // programmable
+```
+
+## Install
+
+```toml
+[dependencies]
+desirable = "1.7"
+```
+
+## Documentation
+
+- [docs.rs/desirable](https://docs.rs/desirable) — full API reference
+- [CHANGELOG](CHANGELOG.md) — release notes for every version
+- [examples/](examples/) — a small application using routing, middleware, sessions, and static files
+
+## Performance
+
+The release profile ships with LTO, `opt-level = "z"`, and stripped binaries. Core crate dependencies: 24, zero of them added for convenience features. Run `cargo bench` for router/response microbenchmarks.
+
+## References
+
+This framework draws inspiration from:
+
+- [axum](https://github.com/tokio-rs/axum)
+- [tide](https://github.com/http-rs/tide)
+- [tinyweb](https://github.com/zzzdong/tinyweb)
+- [基于 hyper 构建一个 Web 框架](https://zhuanlan.zhihu.com/p/164920970)
+
+## License
+
+Licensed under [Apache-2.0](LICENSE).
