@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use bytes::Bytes;
 use desirable::{Middleware, Next, Request, Result, Router};
 
 static SCOPED_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -447,4 +448,72 @@ async fn session_layer_roundtrip_and_tamper_handling() {
   let res = raw_request(addr, req).await;
   assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
   assert!(res.ends_with("anonymous"), "got: {}", res);
+}
+
+#[tokio::test]
+async fn streaming_body_roundtrips_over_chunked_encoding() {
+  let mut app = Router::new();
+  app.get("/events", |_| async {
+    let (sender, body) = desirable::Body::channel(4);
+    tokio::spawn(async move {
+      for i in 0..3 {
+        sender
+          .send(Bytes::from(format!("event-{i}\n")))
+          .await
+          .unwrap();
+      }
+      // sender dropped -> body ends
+    });
+    desirable::Response::builder().body(body)
+  });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  let res = raw_request(addr, &get_request("/events")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  let body = res.split("\r\n\r\n").nth(1).unwrap_or("");
+  // Raw chunked framing: size lines between chunks and a final "0" terminator.
+  assert!(body.contains("event-0"), "got: {:?}", body);
+  assert!(body.contains("event-2"), "got: {:?}", body);
+  // Chunked size lines present ("8" per chunk); hyper may omit the final
+  // CRLF pair when the connection close delimits the end.
+  assert!(
+    body.contains("\r\n8\r\n"),
+    "missing chunked framing: {:?}",
+    body
+  );
+  assert!(
+    body.trim_end().ends_with('0'),
+    "missing last-chunk marker: {:?}",
+    body
+  );
+}
+
+#[tokio::test]
+async fn static_file_streams_with_exact_content_length() {
+  let dir = std::env::temp_dir().join(format!("desirable-stream-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  // A body large enough to span several 64 KiB stream chunks.
+  let big = vec![b'x'; 200 * 1024];
+  std::fs::write(dir.join("big.bin"), &big).unwrap();
+
+  let mut app = Router::new();
+  app.get("/static/*file", desirable::ServeDir::new(dir.clone()));
+
+  let (addr, _server) = spawn_server(app).await;
+
+  let res = raw_request(addr, &get_request("/static/big.bin")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  // Exact fstat length -> Content-Length (not chunked), preserved end-to-end.
+  assert!(
+    res.contains(&format!("content-length: {}", big.len())),
+    "got: {}",
+    res
+  );
+  // Full body survives streaming.
+  let body = res.split("\r\n\r\n").nth(1).unwrap_or("");
+  assert_eq!(body.len(), big.len(), "streamed body must be complete");
+  assert!(body.bytes().all(|b| b == b'x'));
+
+  std::fs::remove_dir_all(&dir).ok();
 }

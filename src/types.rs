@@ -1,7 +1,5 @@
 use crate::Error;
 use crate::Response;
-use bytes::Bytes;
-use http_body_util::Full;
 use hyper::body::Incoming;
 
 /// A result type using anyhow for error handling.
@@ -47,8 +45,9 @@ pub type Result<T = Response> = std::result::Result<T, Error>;
 
 /// Type alias for the underlying hyper response type.
 ///
-/// Represents a complete HTTP response with a `Full<Bytes>` body.
-pub type HyperResponse = hyper::Response<Full<Bytes>>;
+/// Represents a complete HTTP response with a [`Body`](crate::Body) that is
+/// either fully buffered or streamed.
+pub type HyperResponse = hyper::Response<crate::body::Body>;
 
 /// Type alias for the underlying hyper request type.
 ///

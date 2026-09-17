@@ -19,12 +19,15 @@ arrives.
 | 1.7.0 | DX completion | Typed app state (`with_state` + `req.state::<T>()`), SIGTERM graceful shutdown, trailing-slash tolerance, process-wide `set_error_handler()`, `Next::run` error propagation |
 | 1.8.0 | Session automation | `SessionLayer` middleware (load-from-cookie, auto `Set-Cookie` only when modified, tamper resilience), `Request::session()` handle |
 | 1.7.1 | Docs only | README refresh (badges, compile-verified quick start, middleware overview) |
+| 1.9.0 | Performance + architecture | Zero-alloc dispatch, cookie-padding truncation fix (security), single-open static files, `session.rs` split into a directory module, content-type constant unification |
+| 1.10.0 | Middleware hot paths | Cors precomputed header values, borrowing session-cookie lookup, no redundant stat for static files, wrapper-free routes without middleware, allocation-free RequestId generation |
+| 2.0.0 | Streaming bodies | Concrete `Body` enum (`Full` / `Streaming`), `Body::stream` + `Body::channel` (SSE-capable), static files stream by default with exact `Content-Length`; `utils` removed |
 
 ## Deferred (conscious trade-offs)
 
 | Item | Why deferred |
 |------|--------------|
-| WebSocket | Needs a protocol-upgrade stack (hyper upgrades or tungstenite). Large, self-contained project. |
+| WebSocket | Needs a protocol-upgrade stack (hyper upgrades or tungstenite). Large, self-contained project. The 2.0 streaming `Body::channel` removes the biggest prerequisite. |
 | TLS (rustls) | Needs certificate configuration surface plus an acceptor layer. Common production answer today is terminating TLS at a reverse proxy. |
 | HTTP/2 | Requires rewiring the server layer onto hyper's h2 service. |
 | Compression middleware (gzip) | Requires adding `async-compression` — the first new direct dependency. Conflicts with the zero-new-deps principle; acceptable behind a cargo feature flag if demand appears. |

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.0] - 2026-09-18
+
+### Breaking
+
+- **The response body is now `Body`** (`crate::Body`) — a concrete enum of
+  `Full(Bytes)` and `Streaming(BoxBody)` — replacing the previous fixed
+  `Full<Bytes>`:
+  - `HyperResponse` is now `hyper::Response<Body>`; code that names the
+    body type through the alias must adapt.
+  - `Response::inner` (public field) now exposes `Response<Body>`.
+  - `IntoResponse for Body` added; `IntoResponse for Full<Bytes>` retained.
+  - `ResponseBuilder::body` / `Response::body` now accept anything that is
+    `Into<Body>` (covers all previous inputs).
+- **`desirable::utils` removed** (deprecated since 1.9; never contained code).
+- **`desirable::hyper::body` re-export dropped** (the module name now hosts
+  `desirable::body`). Use `hyper::body` directly.
+
+### Added
+
+- **`Body::stream(S)`** — stream any `Stream<Item = Result<impl Into<Bytes>,
+  E>>` chunk by chunk.
+- **`Body::channel(cap)`** — a backpressured `(BodySender, Body)` pair for
+  dynamically produced responses (e.g. server-sent events).
+- **Static files now stream** instead of buffering the whole file: memory
+  use is one 64 KiB chunk regardless of file size. The exact length from
+  `fstat` is preserved as the body's size hint, so responses still carry
+  `Content-Length` (not chunked encoding).
+- New direct dependency: `futures-core` (Stream trait; already present
+  transitively). `tokio-util` gains the `io` feature (same crate).
+
+---
+
 ## [1.10.0] - 2026-09-18
 
 ### Changed
@@ -314,6 +346,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.0.0]: https://github.com/desirable-rs/desirable/compare/v1.10.0...v2.0.0
 [1.10.0]: https://github.com/desirable-rs/desirable/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/desirable-rs/desirable/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/desirable-rs/desirable/compare/v1.7.1...v1.8.0

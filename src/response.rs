@@ -1,6 +1,6 @@
+use crate::body::Body;
 use crate::{HyperResponse, Result};
 use bytes::Bytes;
-use http_body_util::Full;
 use hyper::StatusCode;
 use hyper::header;
 
@@ -73,7 +73,7 @@ impl Response {
     Bytes: From<T>,
   {
     let response = hyper::http::Response::builder()
-      .body(Full::new(Bytes::from(body)))?
+      .body(Body::full(body))?
       .into();
     Ok(response)
   }
@@ -105,7 +105,7 @@ impl Response {
     hyper::http::Response::builder()
       .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
       .status(status)
-      .body(Full::new(Bytes::from(val)))
+      .body(Body::full(val))
       .expect("static status and content-type cannot fail to build")
       .into()
   }
@@ -145,7 +145,7 @@ impl Response {
     let data = serde_json::to_vec(&payload).expect("JSON serialization failed");
     hyper::http::Response::builder()
       .header(header::CONTENT_TYPE, &CONTENT_TYPE_JSON)
-      .body(Full::new(Bytes::from(data)))
+      .body(Body::full(data))
       .unwrap()
       .into()
   }
@@ -164,7 +164,7 @@ impl Response {
   pub fn html(body: impl Into<String>) -> Self {
     hyper::http::Response::builder()
       .header(header::CONTENT_TYPE, &CONTENT_TYPE_HTML)
-      .body(Full::new(Bytes::from(body.into())))
+      .body(Body::full(body.into()))
       .unwrap()
       .into()
   }
@@ -189,7 +189,7 @@ impl Response {
     let response = hyper::http::Response::builder()
       .status(hyper::StatusCode::from_u16(status)?)
       .header(header::LOCATION, url)
-      .body(Full::new(Bytes::default()))?
+      .body(Body::empty())?
       .into();
     Ok(response)
   }
@@ -346,12 +346,12 @@ impl ResponseBuilder {
   /// A `Result` containing the response or an HTTP builder error.
   pub fn text<T>(self, body: T) -> Result<Response>
   where
-    Bytes: From<T>,
+    T: Into<crate::body::Body>,
   {
     let response = self
       .inner
       .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
-      .body(Full::new(Bytes::from(body)))?
+      .body(body.into())?
       .into();
     Ok(response)
   }
@@ -366,7 +366,7 @@ impl ResponseBuilder {
     self
       .inner
       .header(header::CONTENT_TYPE, &CONTENT_TYPE_JSON)
-      .body(Full::new(Bytes::from(data)))
+      .body(Body::full(data))
       .unwrap()
       .into()
   }
@@ -378,10 +378,19 @@ impl ResponseBuilder {
   /// A `Result` containing the response or an HTTP builder error.
   pub fn body<T>(self, body: T) -> Result<Response>
   where
-    Bytes: From<T>,
+    T: Into<crate::body::Body>,
   {
-    let response = self.inner.body(Full::new(Bytes::from(body)))?.into();
+    let response = self.inner.body(body.into())?.into();
     Ok(response)
+  }
+}
+
+impl From<Body> for Response {
+  fn from(body: Body) -> Self {
+    hyper::Response::builder()
+      .body(body)
+      .expect("default parts cannot fail to build")
+      .into()
   }
 }
 
@@ -395,7 +404,7 @@ impl From<()> for Response {
   fn from(_: ()) -> Self {
     hyper::http::Response::builder()
       .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
-      .body(Full::new(Bytes::default()))
+      .body(Body::empty())
       .unwrap()
       .into()
   }
@@ -405,7 +414,7 @@ impl From<String> for Response {
   fn from(val: String) -> Self {
     hyper::http::Response::builder()
       .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
-      .body(Full::new(Bytes::from(val)))
+      .body(Body::full(val))
       .unwrap()
       .into()
   }
@@ -415,7 +424,7 @@ impl From<&'static str> for Response {
   fn from(val: &'static str) -> Self {
     hyper::http::Response::builder()
       .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
-      .body(Full::new(Bytes::from(val)))
+      .body(Body::full(val))
       .unwrap()
       .into()
   }

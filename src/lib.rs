@@ -30,6 +30,7 @@
 //! - **Static Files** - file and directory serving
 //! - **Async/Await** - fully asynchronous throughout
 
+pub mod body;
 pub mod cors;
 pub mod error;
 pub mod fs;
@@ -42,12 +43,8 @@ pub mod router;
 pub mod server;
 pub mod session;
 pub mod types;
-#[deprecated(
-  since = "1.9.0",
-  note = "this module has never contained any code and will be removed in 2.0"
-)]
-pub mod utils;
 
+pub use body::{Body, BodySender, BoxError};
 pub use cors::Cors;
 pub use error::{Error, error_msg, invalid_param, missing_param, set_error_handler};
 pub use fs::{ServeDir, ServeFile};
@@ -86,6 +83,5 @@ pub fn new(addr: &str) -> Server {
 }
 
 // re-export
-pub use hyper::body;
 pub use hyper::header;
 pub use hyper::http;

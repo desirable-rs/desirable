@@ -1,3 +1,4 @@
+use crate::body::Body;
 use crate::response::{CONTENT_TYPE_OCTET, CONTENT_TYPE_TEXT};
 use crate::{Error, Result};
 use bytes::{Bytes, BytesMut};
@@ -57,7 +58,7 @@ pub trait IntoResponse {
 fn build_response(
   status: hyper::StatusCode,
   content_type: Option<&'static header::HeaderValue>,
-  body: impl Into<Full<Bytes>>,
+  body: impl Into<Body>,
 ) -> Result {
   let mut builder = hyper::http::Response::builder().status(status);
   if let Some(ct) = content_type {
@@ -65,6 +66,12 @@ fn build_response(
   }
   let response = builder.body(body.into())?.into();
   Ok(response)
+}
+
+impl IntoResponse for Body {
+  fn into_response(self) -> Result {
+    Ok(crate::Response::from(self))
+  }
 }
 
 impl IntoResponse for Full<Bytes> {

@@ -294,29 +294,23 @@ mod tests {
     );
   }
 
-  #[test]
-  fn test_server_errors_do_not_leak_details() {
+  #[tokio::test]
+  async fn test_server_errors_do_not_leak_details() {
+    use http_body_util::BodyExt as _;
+
     let response: Response = error_msg("secret-db-password").into();
-    let body = response
-      .inner
-      .body()
-      .clone()
-      .into_inner()
-      .expect("full body has data");
+    let body = response.inner.collect().await.unwrap().to_bytes();
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(!text.contains("secret-db-password"));
     assert_eq!(text, "internal server error");
   }
 
-  #[test]
-  fn test_client_errors_keep_message() {
+  #[tokio::test]
+  async fn test_client_errors_keep_message() {
+    use http_body_util::BodyExt as _;
+
     let response: Response = missing_param("user_id").into();
-    let body = response
-      .inner
-      .body()
-      .clone()
-      .into_inner()
-      .expect("full body has data");
+    let body = response.inner.collect().await.unwrap().to_bytes();
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(text.contains("user_id"), "got: {}", text);
   }

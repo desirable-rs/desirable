@@ -15,7 +15,7 @@ name = "desirable"
 publish = true # no accidents while in dev
 readme = "README.md"
 repository = "https://github.com/desirable-rs/desirable"
-version = "1.10.0"
+version = "2.0.0"
 
 include = [
   "Cargo.toml",
@@ -33,8 +33,9 @@ bytes = "^1.11.0"
 chrono = { version = "^0.4.43", features = ["serde"] }
 cookie = "^0.18.0"
 hmac = "^0.12.1"
+futures-core = "^0.3"
 http-body = "^1.0.1"
-http-body-util = "^0.1.3"
+http-body-util = "^0.1.4"
 hyper = { version = "^1.8.1", features = ["full"] }
 hyper-util = { version = "^0.1.19", features = ["full"] }
 httpdate = "^1.0.3"
@@ -48,7 +49,7 @@ sha2 = "^0.10.8"
 thiserror = "^2.0.18"
 time = "^0.3.36"
 tokio = { version = "^1.49.0", features = ["full"] }
-tokio-util = { version = "^0.7", features = ["rt"] }
+tokio-util = { version = "^0.7", features = ["io", "rt"] }
 tracing = "^0.1.44"
 [dev-dependencies]
 criterion = "0.8.1"

@@ -1,6 +1,4 @@
 use crate::{DynEndpoint, Endpoint, IntoResponse, Middleware, Next, Request, Response, Result};
-use bytes::Bytes;
-use http_body_util::Full;
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -439,7 +437,7 @@ impl Router {
 
     // Per HTTP semantics, HEAD responses carry no body.
     if is_head && let Ok(res) = &mut response {
-      *res.inner.body_mut() = Full::new(Bytes::new());
+      *res.inner.body_mut() = crate::body::Body::empty();
     }
 
     response

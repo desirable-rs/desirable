@@ -1,10 +1,12 @@
+use crate::body::Body;
 use crate::{Endpoint, Request, Response, Result};
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::combinators::BoxBody;
 use hyper::header;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncReadExt as _;
 
 /// Returns the MIME type for a file based on its extension.
 ///
@@ -119,7 +121,7 @@ impl Endpoint for ServeFile {
 /// responds `304 Not Modified` with an empty body.
 async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
   // A missing file is a client-visible 404, not a server error.
-  let (mut file, meta) = match open_for_serve(path).await {
+  let (file, meta) = match open_for_serve(path).await {
     Ok(opened) => opened,
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
       return Ok(Response::with_status_code(
@@ -143,24 +145,52 @@ async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
       .status(hyper::StatusCode::NOT_MODIFIED)
       .header(header::ETAG, etag.as_str())
       .header(header::LAST_MODIFIED, last_modified)
-      .body(Full::new(Bytes::new()))?;
+      .body(Body::empty())?;
     return Ok(response.into());
   }
 
-  let mut body = Vec::with_capacity(meta.len() as usize);
-  if let Err(err) = file.read_to_end(&mut body).await {
-    if err.kind() == std::io::ErrorKind::NotFound {
-      return Response::with_status(404, "not found".to_string());
-    }
-    return Err(err.into());
-  }
+  // Stream the file: memory use is one chunk, not the whole file. The
+  // exact length from fstat is preserved as the size hint so hyper sends
+  // Content-Length instead of chunked encoding.
+  let len = meta.len();
+  let stream = tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024);
+  let body = Body::Streaming(BoxBody::new(SizedBody {
+    inner: Body::stream(stream),
+    len,
+  }));
   let mime = mime_for_path(path);
   let response = hyper::Response::builder()
     .header(header::CONTENT_TYPE, mime)
     .header(header::ETAG, etag.as_str())
     .header(header::LAST_MODIFIED, last_modified)
-    .body(Full::new(Bytes::from(body)))?;
+    .body(body)?;
   Ok(response.into())
+}
+
+/// Wraps a streaming body whose exact length is known up front (from
+/// `fstat`), so hyper can send `Content-Length` instead of chunked encoding.
+struct SizedBody<B> {
+  inner: B,
+  len: u64,
+}
+
+impl<B> http_body::Body for SizedBody<B>
+where
+  B: http_body::Body<Data = Bytes, Error = crate::body::BoxError> + Unpin,
+{
+  type Data = Bytes;
+  type Error = crate::body::BoxError;
+
+  fn poll_frame(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>> {
+    Pin::new(&mut self.get_mut().inner).poll_frame(cx)
+  }
+
+  fn size_hint(&self) -> http_body::SizeHint {
+    http_body::SizeHint::with_exact(self.len)
+  }
 }
 
 /// Evaluates the request's conditional headers against the file state.
