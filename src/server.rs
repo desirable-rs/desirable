@@ -9,8 +9,15 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use tracing::{debug, error, info, warn};
+
+/// Default maximum time in-flight connections are given to finish after a
+/// shutdown signal before the server gives up waiting.
+const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Internal service type for hyper integration.
 ///
@@ -79,6 +86,8 @@ pub async fn dispatch(
 pub struct Server {
   /// The address to bind to
   addr: SocketAddr,
+  /// Maximum time in-flight connections are given to finish after shutdown
+  drain_timeout: Duration,
 }
 
 impl Server {
@@ -96,9 +105,27 @@ impl Server {
   ///
   /// Panics if the address string is invalid
   pub fn bind(addr: &str) -> Self {
-    Server {
-      addr: addr.parse().unwrap(),
-    }
+    Server::try_bind(addr).unwrap()
+  }
+
+  /// Creates a new server from the given address, returning an error instead
+  /// of panicking when the address string is invalid.
+  pub fn try_bind(addr: &str) -> Result<Self> {
+    let addr: SocketAddr = addr.parse()?;
+    Ok(Server {
+      addr,
+      drain_timeout: DEFAULT_DRAIN_TIMEOUT,
+    })
+  }
+
+  /// Sets the maximum time in-flight connections are given to finish after
+  /// a shutdown signal before the server stops waiting.
+  ///
+  /// Default: 10 seconds.
+  #[must_use]
+  pub fn drain_timeout(mut self, timeout: Duration) -> Self {
+    self.drain_timeout = timeout;
+    self
   }
 
   /// Starts the server and serves requests until shutdown signal.
@@ -117,72 +144,114 @@ impl Server {
     self.run_graceful(router).await
   }
 
-  /// Starts the server with explicit graceful shutdown support.
+  /// Starts the server with graceful shutdown on Ctrl+C (SIGINT).
   ///
-  /// Binds a TCP listener to the configured address and serves requests
-  /// until a Ctrl+C (SIGINT) signal is received, at which point the
-  /// server stops accepting new connections and returns.
+  /// On shutdown the server stops accepting new connections, signals existing
+  /// connections to finish their in-flight requests, and waits (up to the
+  /// configured [`Server::drain_timeout`]) for them to complete.
+  pub async fn run_graceful(&self, router: Router) -> Result<()> {
+    self.run_with_shutdown(router, shutdown_signal()).await
+  }
+
+  /// Starts the server and serves requests until the given `signal` future
+  /// resolves, then drains connections gracefully.
+  ///
+  /// This is the programmable form of [`Server::run_graceful`]: use it when
+  /// you need to trigger shutdown yourself (tests, orchestration, custom
+  /// signals).
   ///
   /// # Arguments
   ///
   /// * `router` - The application router to handle requests
-  ///
-  /// # Returns
-  ///
-  /// `Ok(())` on graceful shutdown, or an error on bind/accept failure
+  /// * `signal` - A future whose completion triggers graceful shutdown
   ///
   /// # Example
   ///
   /// ```rust,ignore
-  /// use desirable::{Router, Result};
-  ///
-  /// #[tokio::main]
-  /// async fn main() -> Result<()> {
-  ///   let router = Router::new();
-  ///   router.get("/", || async { "Hello!" });
-  ///
-  ///   let server = desirable::new("127.0.0.1:8080");
-  ///   server.run_graceful(router).await
-  /// }
+  /// let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+  /// server.run_with_shutdown(router, async move {
+  ///   let _ = rx.await;
+  /// }).await?;
   /// ```
-  pub async fn run_graceful(&self, router: Router) -> Result<()> {
-    let addr: SocketAddr = self.addr;
-    let listener = TcpListener::bind(addr).await?;
-    info!("Listening on http://{}", addr);
+  pub async fn run_with_shutdown(
+    &self,
+    router: Router,
+    signal: impl Future<Output = ()>,
+  ) -> Result<()> {
+    let listener = TcpListener::bind(self.addr).await?;
+    info!("Listening on http://{}", self.addr);
 
     let router = Arc::new(router);
+    let tracker = TaskTracker::new();
+    let shutdown = CancellationToken::new();
 
     tokio::select! {
-      result = accept_loop(listener, router) => result,
-      _ = shutdown_signal() => {
-        info!("Shutdown signal received, stopping...");
-        Ok(())
+      result = accept_loop(listener, router, &tracker, shutdown.clone()) => {
+        result?;
+      }
+      _ = signal => {
+        info!("Shutdown signal received, draining connections...");
+        shutdown.cancel();
       }
     }
+
+    tracker.close();
+    match tokio::time::timeout(self.drain_timeout, tracker.wait()).await {
+      Ok(()) => info!("All connections drained, shutdown complete"),
+      Err(_) => warn!(
+        "Drain timeout of {:?} elapsed, abandoning in-flight connections",
+        self.drain_timeout
+      ),
+    }
+    Ok(())
   }
 }
 
-/// Accepts connections in a loop until the listener is closed or an error occurs.
-async fn accept_loop(listener: TcpListener, router: Arc<Router>) -> Result<()> {
+/// Accepts connections in a loop until the listener is closed, an error
+/// occurs, or the shutdown token is cancelled.
+async fn accept_loop(
+  listener: TcpListener,
+  router: Arc<Router>,
+  tracker: &TaskTracker,
+  shutdown: CancellationToken,
+) -> Result<()> {
   loop {
-    let router = router.clone();
-    let (stream, remote_addr) = listener.accept().await?;
-    let io = TokioIo::new(stream);
-    let remote_addr = Arc::new(remote_addr);
-    tokio::task::spawn(async move {
-      if let Err(err) = http1::Builder::new()
-        .serve_connection(
-          io,
-          Svc {
-            router,
-            remote_addr,
-          },
-        )
-        .await
-      {
-        error!("Failed to serve connection: {:?}", err);
+    tokio::select! {
+      accepted = listener.accept() => {
+        let (stream, remote_addr) = accepted?;
+        // Reduce latency for small request/response pairs; failure is benign.
+        if let Err(err) = stream.set_nodelay(true) {
+          debug!("Failed to set TCP_NODELAY: {}", err);
+        }
+        let io = TokioIo::new(stream);
+        let remote_addr = Arc::new(remote_addr);
+        let router = Arc::clone(&router);
+        let shutdown = shutdown.clone();
+        tracker.spawn(async move {
+          let conn = http1::Builder::new().serve_connection(
+            io,
+            Svc {
+              router,
+              remote_addr,
+            },
+          );
+          tokio::pin!(conn);
+          tokio::select! {
+            _ = &mut conn => {}
+            _ = shutdown.cancelled() => {
+              // Stop keep-alive, finish the in-flight request, then exit.
+              conn.as_mut().graceful_shutdown();
+              if let Err(err) = conn.as_mut().await {
+                error!("Connection error during drain: {:?}", err);
+              }
+            }
+          }
+        });
       }
-    });
+      _ = shutdown.cancelled() => {
+        return Ok(());
+      }
+    }
   }
 }
 
