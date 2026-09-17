@@ -370,3 +370,75 @@ async fn trailing_slash_matches_registered_route() {
   assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
   assert!(res.ends_with("users"), "got: {}", res);
 }
+
+#[tokio::test]
+async fn session_layer_roundtrip_and_tamper_handling() {
+  use desirable::{Request, Result, SessionConfig, SessionLayer, SessionManager};
+
+  async fn login(mut req: Request) -> Result {
+    let user: String = req.body_json().await?;
+    req.session().lock().unwrap().insert("user", user)?;
+    Ok::<_, desirable::Error>("ok".into())
+  }
+
+  async fn whoami(req: Request) -> &'static str {
+    let name: Option<String> = req.session().lock().unwrap().get("user").unwrap();
+    if name.is_some() { "known" } else { "anonymous" }
+  }
+
+  let manager = SessionManager::new(SessionConfig::new(b"test-key-32-bytes-long!!!!!12345"));
+  let mut app = Router::new();
+  app.with(SessionLayer::new(manager));
+  app.post("/login", |req: Request| login(req));
+  app.get("/me", whoami);
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // (d) Anonymous request: no Set-Cookie, session untouched.
+  let res = raw_request(addr, &get_request("/me")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("anonymous"), "got: {}", res);
+  assert!(!res.to_ascii_lowercase().contains("set-cookie"), "got: {}", res);
+
+  // (a) Modified session: response carries Set-Cookie.
+  let body = r#""alice""#;
+  let login_req = format!(
+    "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+    body.len(),
+    body
+  );
+  let res = raw_request(addr, &login_req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  let set_cookie = res
+    .lines()
+    .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
+    .expect("login must set session cookie")
+    .to_string();
+  let cookie_pair = set_cookie
+    .split(':')
+    .nth(1)
+    .unwrap_or_default()
+    .split(';')
+    .next()
+    .unwrap_or_default()
+    .trim()
+    .to_string();
+  assert!(cookie_pair.starts_with("desirable_session="), "got: {}", cookie_pair);
+
+  // (b) Cookie roundtrip: session value readable on the next request.
+  let req = format!(
+    "GET /me HTTP/1.1\r\nHost: localhost\r\nCookie: {}\r\nConnection: close\r\n\r\n",
+    cookie_pair
+  );
+  let res = raw_request(addr, &req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("known"), "got: {}", res);
+
+  // (c) Tampered cookie: fresh session, request still succeeds.
+  let req = format!(
+    "GET /me HTTP/1.1\r\nHost: localhost\r\nCookie: desirable_session=GARBAGEVALUE\r\nConnection: close\r\n\r\n"
+  );
+  let res = raw_request(addr, &req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("anonymous"), "got: {}", res);
+}
