@@ -396,6 +396,15 @@ impl SessionManager {
   /// }
   /// ```
   pub fn get_cookie_value(&self, headers: &hyper::header::HeaderMap) -> Option<String> {
+    self.get_cookie_value_str(headers).map(str::to_string)
+  }
+
+  /// Borrowing variant of [`SessionManager::get_cookie_value`] — no
+  /// allocation; the reference is valid as long as `headers` is.
+  pub(crate) fn get_cookie_value_str<'a>(
+    &self,
+    headers: &'a hyper::header::HeaderMap,
+  ) -> Option<&'a str> {
     let name = &self.config.cookie_name;
     headers
       .get(http::header::COOKIE)
@@ -408,7 +417,7 @@ impl SessionManager {
           // everything after the FIRST `=` — cookie values may themselves
           // contain `=` (base64 padding), which must not be truncated.
           .find(|s| s.starts_with(name.as_str()) && s.as_bytes().get(name.len()) == Some(&b'='))
-          .and_then(|s| s.split_once('=').map(|(_, value)| value.to_string()))
+          .and_then(|s| s.split_once('=').map(|(_, value)| value))
       })
   }
 }

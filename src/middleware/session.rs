@@ -79,16 +79,19 @@ impl SessionLayer {
 #[async_trait::async_trait]
 impl Middleware for SessionLayer {
   async fn handle(&self, mut req: Request, next: Next<'_>) -> Result {
-    // Load (or start) the session for this request.
-    let cookie = self.manager.get_cookie_value(req.inner.headers());
-    let session = match cookie.as_deref().map(|c| self.manager.read_session(c)) {
-      Some(Ok(Some(session))) => session,
-      Some(Ok(None)) => self.manager.create_session(),
-      Some(Err(err)) => {
-        debug!(%err, "session cookie rejected, starting a fresh session");
-        self.manager.create_session()
+    // Load (or start) the session for this request; the cookie lookup is
+    // borrowing, so no per-request allocation happens here.
+    let session = {
+      let cookie = self.manager.get_cookie_value_str(req.inner.headers());
+      match cookie.map(|c| self.manager.read_session(c)) {
+        Some(Ok(Some(session))) => session,
+        Some(Ok(None)) => self.manager.create_session(),
+        Some(Err(err)) => {
+          debug!(%err, "session cookie rejected, starting a fresh session");
+          self.manager.create_session()
+        }
+        None => self.manager.create_session(),
       }
-      None => self.manager.create_session(),
     };
 
     // Share the session with handlers; keep our own clone to persist after.

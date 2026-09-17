@@ -196,15 +196,21 @@ impl Router {
       Some(prefix) => format!("{}{}", prefix, route),
       None => route.to_string(),
     };
-    let scoped = ScopedEndpoint {
-      endpoint: Box::new(dest),
-      middlewares: Arc::clone(&self.middlewares_arc),
+    // An empty middleware chain is a pass-through: skip the wrapper instead
+    // of paying an extra call layer on every request.
+    let endpoint: Box<DynEndpoint> = if self.middlewares_arc.is_empty() {
+      Box::new(dest)
+    } else {
+      Box::new(ScopedEndpoint {
+        endpoint: Box::new(dest),
+        middlewares: Arc::clone(&self.middlewares_arc),
+      })
     };
     let tables = self.routes.entry(method).or_default();
     if tables.is_empty() {
       tables.push(route_recognizer::Router::new());
     }
-    tables.last_mut().unwrap().add(&path, Box::new(scoped));
+    tables.last_mut().unwrap().add(&path, endpoint);
   }
 
   /// Adds a GET route.

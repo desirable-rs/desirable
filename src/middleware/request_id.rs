@@ -1,8 +1,15 @@
 use crate::{Middleware, Next, Request, Result};
 use rand::RngCore as _;
+use std::sync::OnceLock;
 
 /// Header name used by the [`RequestId`] middleware.
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// The header name, parsed once instead of per request.
+fn request_header_name() -> &'static hyper::header::HeaderName {
+  static NAME: OnceLock<hyper::header::HeaderName> = OnceLock::new();
+  NAME.get_or_init(|| hyper::header::HeaderName::from_static(REQUEST_ID_HEADER))
+}
 
 /// The request ID shared via `request.extensions()`.
 ///
@@ -35,9 +42,15 @@ pub struct RequestId;
 impl RequestId {
   /// Generates a random 32-character lowercase hex ID.
   fn generate() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    let mut out = String::with_capacity(32);
+    for byte in bytes {
+      out.push(HEX[(byte >> 4) as usize] as char);
+      out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
   }
 }
 
@@ -55,10 +68,7 @@ impl Middleware for RequestId {
     let mut response = next.run(req).await;
 
     if let (Ok(res), Ok(value)) = (&mut response, hyper::header::HeaderValue::from_str(&id)) {
-      res.inner.headers_mut().insert(
-        hyper::header::HeaderName::from_static(REQUEST_ID_HEADER),
-        value,
-      );
+      res.inner.headers_mut().insert(request_header_name(), value);
     }
 
     response

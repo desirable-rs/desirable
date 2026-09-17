@@ -118,10 +118,9 @@ impl Endpoint for ServeFile {
 /// than the file's modification time and no `If-None-Match` is present),
 /// responds `304 Not Modified` with an empty body.
 async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
-  // Open once; metadata comes from the open handle (fstat) instead of a
-  // second path lookup. A missing file is a client-visible 404.
-  let mut file = match tokio::fs::File::open(path).await {
-    Ok(file) => file,
+  // A missing file is a client-visible 404, not a server error.
+  let (mut file, meta) = match open_for_serve(path).await {
+    Ok(opened) => opened,
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
       return Ok(Response::with_status_code(
         hyper::StatusCode::NOT_FOUND,
@@ -130,7 +129,6 @@ async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
     }
     Err(err) => return Err(err.into()),
   };
-  let meta = file.metadata().await?;
   let modified = meta.modified()?;
   let mtime_secs = modified
     .duration_since(UNIX_EPOCH)
@@ -184,17 +182,20 @@ fn is_not_modified(req: &Request, etag: &str, modified: SystemTime) -> bool {
   false
 }
 
-/// Returns the file to serve: `path` itself, or `path/index.html` when the
+/// Opens `path` for serving, falling back to `path/index.html` when the
 /// path resolves to a directory (directory-index fallback).
-async fn with_dir_index(path: PathBuf) -> PathBuf {
-  if tokio::fs::metadata(&path)
-    .await
-    .map(|m| m.is_dir())
-    .unwrap_or(false)
-  {
-    path.join("index.html")
+///
+/// A regular file costs a single `open` + `fstat`; the extra open happens
+/// only for directory hits.
+async fn open_for_serve(path: &Path) -> std::io::Result<(tokio::fs::File, std::fs::Metadata)> {
+  let file = tokio::fs::File::open(path).await?;
+  let meta = file.metadata().await?;
+  if meta.is_dir() {
+    let file = tokio::fs::File::open(path.join("index.html")).await?;
+    let meta = file.metadata().await?;
+    Ok((file, meta))
   } else {
-    path
+    Ok((file, meta))
   }
 }
 
@@ -279,7 +280,6 @@ impl Endpoint for ServeDir {
         ));
       }
     };
-    let resolved = with_dir_index(resolved).await;
     serve_file_with_cache(&req, &resolved).await
   }
 }
@@ -361,21 +361,22 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_with_dir_index_serves_index_html_for_directories() {
+  async fn test_open_for_serve_falls_back_to_index_html() {
     let base = std::env::temp_dir().join(format!("desirable-dir-index-{}", std::process::id()));
     let subdir = base.join("site");
     std::fs::create_dir_all(&subdir).unwrap();
     std::fs::write(subdir.join("index.html"), "<h1>hi</h1>").unwrap();
 
-    // A directory resolves to its index.html.
-    let resolved = with_dir_index(subdir.clone()).await;
-    assert_eq!(resolved, subdir.join("index.html"));
+    // A directory opens its index.html.
+    let (file, meta) = open_for_serve(&subdir).await.unwrap();
+    assert!(!meta.is_dir());
+    drop(file);
 
-    // A file stays as-is.
+    // A file opens directly.
     let file_path = base.join("app.js");
     std::fs::write(&file_path, b"console.log(1)").unwrap();
-    let resolved = with_dir_index(file_path.clone()).await;
-    assert_eq!(resolved, file_path);
+    let (_, meta) = open_for_serve(&file_path).await.unwrap();
+    assert_eq!(meta.len(), 14);
 
     std::fs::remove_dir_all(&base).ok();
   }

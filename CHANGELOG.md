@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.10.0] - 2026-09-18
+
+### Changed
+
+- **Middleware hot-path optimizations** (no behavior changes):
+  - **Cors** precomputes its `HeaderValue`s at construction time — the
+    request path previously parsed 4–6 header values (including a
+    `to_string()` round-trip for `max_age`) on every response. Invalid
+    configured values now panic at construction instead of on first use.
+  - **SessionLayer** uses a borrowing cookie lookup (`get_cookie_value_str`)
+    instead of allocating an owned `String` per request; the public
+    `get_cookie_value` is unchanged.
+  - **Static files** drop the redundant pre-check stat: a regular file is
+    served with one `open` + `fstat` (was 2 stats + 1 open). Directory-index
+    fallback happens inside the open flow.
+  - **Router** skips the `ScopedEndpoint` wrapper for routes registered
+    without middleware, removing one async call layer per request for those
+    routes.
+  - **RequestId** generates IDs via a hex lookup table (was 16 `format!`
+    allocations) and caches its `HeaderName`.
+
+---
+
 ## [1.9.0] - 2026-09-18
 
 ### Fixed
@@ -291,6 +314,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[1.10.0]: https://github.com/desirable-rs/desirable/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/desirable-rs/desirable/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/desirable-rs/desirable/compare/v1.7.1...v1.8.0
 [1.7.1]: https://github.com/desirable-rs/desirable/compare/v1.7.0...v1.7.1
