@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.0] - 2026-07-25
+
+### Added
+
+- **Typed application state.** `Router::with_state(state)` stores shared
+  state (DB pools, config); handlers read it with
+  `req.state::<T>() -> Option<Arc<T>>` (type-checked downcast). State is
+  injected into every request's extensions at dispatch time; on `merge()`,
+  the parent's state wins.
+- **SIGTERM triggers graceful shutdown** (in addition to Ctrl+C/SIGINT), so
+  orchestrators like Kubernetes and systemd drain connections properly.
+- **Trailing-slash tolerance.** `GET /users/` now matches a route registered
+  as `/users` (exact match still wins); 405 `Allow` detection is slash-aware
+  too.
+- **`set_error_handler()`** — a process-wide custom renderer for every
+  handler error, enabling uniform JSON error envelopes:
+  `set_error_handler(|err| Response::builder().status(err.status()).json(...))`.
+
+### Changed
+
+- `Next::run` now propagates middleware errors to the caller instead of
+  converting them in place, matching its documented behavior and enabling
+  outer layers to observe failures.
+
+---
+
 ## [1.6.0] - 2026-07-25
 
 ### Fixed
@@ -201,6 +227,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/desirable-rs/desirable/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/desirable-rs/desirable/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/desirable-rs/desirable/compare/v1.3.0...v1.4.0

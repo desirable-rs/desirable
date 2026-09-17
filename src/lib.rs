@@ -45,7 +45,7 @@ pub mod types;
 pub mod utils;
 
 pub use cors::Cors;
-pub use error::Error;
+pub use error::{Error, error_msg, invalid_param, missing_param, set_error_handler};
 pub use fs::{ServeDir, ServeFile};
 pub use into_response::IntoResponse;
 pub use kernel::{DynEndpoint, Endpoint, Middleware, Next};

@@ -1,4 +1,4 @@
-use crate::{Error, Response, Result};
+use crate::{Error, Result};
 use bytes::{Bytes, BytesMut};
 use http_body_util::Full;
 use hyper::header;
@@ -104,14 +104,7 @@ where
 
 impl IntoResponse for Error {
   fn into_response(self) -> Result {
-    let status = self.status();
-    if self.is_server_error() {
-      // Never leak internal details to clients; log the real error instead.
-      tracing::error!(error = %self, "handler failed");
-      Response::with_status(status.as_u16(), "internal server error".to_string())
-    } else {
-      Response::with_status(status.as_u16(), self.to_string())
-    }
+    Ok(crate::error::render_error(self))
   }
 }
 

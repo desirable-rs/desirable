@@ -1,6 +1,7 @@
 use crate::{DynEndpoint, Endpoint, IntoResponse, Middleware, Next, Request, Response, Result};
 use bytes::Bytes;
 use http_body_util::Full;
+use std::any::Any;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -43,6 +44,9 @@ pub struct Router {
   pub not_found_handler: Box<DynEndpoint>,
   /// Handler for paths that exist under other methods
   pub method_not_allowed_handler: Box<DynEndpoint>,
+  /// Shared application state, injected into every request's extensions.
+  /// Set via [`Router::with_state`], read via [`Request::state`](crate::Request::state).
+  pub state: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 /// Extension carrying the HTTP methods that can serve the matched path.
@@ -120,7 +124,30 @@ impl Router {
       routes: HashMap::new(),
       not_found_handler: Box::new(default_handler),
       method_not_allowed_handler: Box::new(default_method_not_allowed_handler),
+      state: None,
     }
+  }
+
+  /// Sets the shared application state, available to all handlers via
+  /// [`Request::state`](crate::Request::state).
+  ///
+  /// Call this before merging the router into another: the child's state is
+  /// discarded on merge and the parent's state is what gets injected.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// let db = DbPool::new();
+  /// let mut app = Router::new().with_state(db);
+  /// app.get("/users", |req: Request| async move {
+  ///   let db = req.state::<DbPool>().ok_or_else(|| error_msg("no state"))?;
+  ///   // ...
+  /// });
+  /// ```
+  #[must_use]
+  pub fn with_state<T: Send + Sync + 'static>(mut self, state: T) -> Self {
+    self.state = Some(Arc::new(state));
+    self
   }
 
   /// Sets the path prefix for all routes registered on this router.
@@ -367,28 +394,30 @@ impl Router {
     let not_found: &DynEndpoint = &*self.not_found_handler;
     let not_allowed: &DynEndpoint = &*self.method_not_allowed_handler;
 
-    let matched = self
-      .routes
-      .get(lookup_method)
-      .and_then(|tables| tables.iter().find_map(|table| table.recognize(&path).ok()));
+    let matched = self.match_path(lookup_method, &path);
 
-    let (endpoint, middlewares): (&DynEndpoint, &[Arc<dyn Middleware>]) = if let Some(m) = matched {
-      m.params().clone_into(&mut params);
-      (&***m.handler(), &[])
-    } else {
-      // No route for this method. If the path exists under other methods,
-      // respond 405 Method Not Allowed; otherwise fall back to 404.
-      let methods = self.matching_methods(&path);
-      if methods.is_empty() {
-        (not_found, &self.middlewares)
+    let (endpoint, middlewares): (&DynEndpoint, &[Arc<dyn Middleware>]) =
+      if let Some((handler, matched_params)) = matched {
+        matched_params.clone_into(&mut params);
+        (handler, &[])
       } else {
-        req.extensions_mut().insert(AllowedMethods(methods));
-        (not_allowed, &self.middlewares)
-      }
-    };
+        // No route for this method. If the path exists under other methods,
+        // respond 405 Method Not Allowed; otherwise fall back to 404.
+        let methods = self.matching_methods(&path);
+        if methods.is_empty() {
+          (not_found, &self.middlewares)
+        } else {
+          req.extensions_mut().insert(AllowedMethods(methods));
+          (not_allowed, &self.middlewares)
+        }
+      };
 
     req.params = params;
     req.remote_addr = Some(remote_addr);
+    if let Some(state) = &self.state {
+      req.extensions_mut().insert(Arc::clone(state));
+    }
+
     let mut response = Next {
       endpoint,
       middlewares,
@@ -404,13 +433,39 @@ impl Router {
     response
   }
 
+  /// Attempts to match `method`'s route tables against `path`, tolerating a
+  /// trailing slash: `/users/` falls back to `/users` when no exact route
+  /// (or route registered with a trailing slash) matches.
+  fn match_path(
+    &self,
+    method: &hyper::Method,
+    path: &str,
+  ) -> Option<(&DynEndpoint, route_recognizer::Params)> {
+    let tables = self.routes.get(method)?;
+    let try_one = |p: &str| tables.iter().find_map(|table| table.recognize(p).ok());
+    try_one(path)
+      .or_else(|| {
+        let trimmed = path.strip_suffix('/')?;
+        (!trimmed.is_empty()).then(|| try_one(trimmed)).flatten()
+      })
+      .map(|m| {
+        let handler: &DynEndpoint = &***m.handler();
+        (handler, m.params().clone())
+      })
+  }
+
   /// Returns the HTTP methods whose route tables contain a match for `path`,
-  /// sorted for a stable `Allow` header.
+  /// sorted for a stable `Allow` header. Tolerates a trailing slash.
   fn matching_methods(&self, path: &str) -> Vec<hyper::Method> {
+    let trimmed = path.strip_suffix('/').filter(|t| !t.is_empty());
+    let matches = |table: &route_recognizer::Router<Box<DynEndpoint>>| {
+      table.recognize(path).is_ok()
+        || trimmed.is_some_and(|trimmed| table.recognize(trimmed).is_ok())
+    };
     let mut methods: Vec<hyper::Method> = self
       .routes
       .iter()
-      .filter(|(_, tables)| tables.iter().any(|table| table.recognize(path).is_ok()))
+      .filter(|(_, tables)| tables.iter().any(matches))
       .map(|(method, _)| method.clone())
       .collect();
     methods.sort_by(|a, b| a.as_str().cmp(b.as_str()));

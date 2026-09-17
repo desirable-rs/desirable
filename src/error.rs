@@ -1,5 +1,58 @@
 use crate::Response;
+use std::sync::Arc;
+use std::sync::OnceLock;
 use thiserror::Error;
+
+type ErrorRenderer = Arc<dyn Fn(Error) -> Response + Send + Sync>;
+
+static ERROR_RENDERER: OnceLock<ErrorRenderer> = OnceLock::new();
+
+/// Sets a process-wide custom renderer for [`Error`] responses.
+///
+/// Call this once at startup (e.g. from `main`) to render every handler
+/// error through your own function — typically to emit a uniform JSON error
+/// envelope. Setting it twice keeps the first renderer.
+///
+/// Without a custom renderer, client errors (`4xx`) keep their message and
+/// server errors (`5xx`) return a generic `"internal server error"` body.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use desirable::{set_error_handler, Response};
+///
+/// set_error_handler(|err| {
+///   Response::builder()
+///     .status(err.status())
+///     .json(serde_json::json!({
+///       "error": err.to_string(),
+///       "status": err.status().as_u16(),
+///     }))
+/// });
+/// ```
+pub fn set_error_handler(renderer: impl Fn(Error) -> Response + Send + Sync + 'static) {
+  let _ = ERROR_RENDERER.set(Arc::new(renderer));
+}
+
+/// Renders an error to a response via the custom renderer when installed,
+/// otherwise through the default 4xx/5xx policy.
+pub(crate) fn render_error(err: Error) -> Response {
+  match ERROR_RENDERER.get() {
+    Some(renderer) => renderer(err),
+    None => default_render_error(err),
+  }
+}
+
+fn default_render_error(err: Error) -> Response {
+  let status = err.status();
+  if err.is_server_error() {
+    // Never leak internal details to clients; log the real error instead.
+    tracing::error!(error = %err, "handler failed");
+    Response::with_status(status.as_u16(), "internal server error".to_string()).unwrap()
+  } else {
+    Response::with_status(status.as_u16(), err.to_string()).unwrap()
+  }
+}
 
 /// The error type for the desirable framework.
 ///
@@ -164,14 +217,7 @@ pub fn invalid_param(
 
 impl From<Error> for Response {
   fn from(err: Error) -> Self {
-    let status = err.status();
-    // Never leak internal details for server errors.
-    let body = if err.is_server_error() {
-      "internal server error".to_string()
-    } else {
-      err.to_string()
-    };
-    Response::with_status(status.as_u16(), body).unwrap()
+    render_error(err)
   }
 }
 

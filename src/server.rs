@@ -259,11 +259,24 @@ async fn accept_loop(
   }
 }
 
-/// Waits for a shutdown signal (Ctrl+C).
+/// Waits for a shutdown signal: Ctrl+C (SIGINT) or SIGTERM on Unix,
+/// Ctrl+C elsewhere.
 async fn shutdown_signal() {
-  tokio::signal::ctrl_c()
-    .await
-    .expect("failed to install Ctrl+C handler");
+  #[cfg(unix)]
+  {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    tokio::select! {
+      _ = tokio::signal::ctrl_c() => {}
+      _ = term.recv() => {}
+    }
+  }
+  #[cfg(not(unix))]
+  {
+    tokio::signal::ctrl_c()
+      .await
+      .expect("failed to install Ctrl+C handler");
+  }
 }
 
 #[cfg(test)]

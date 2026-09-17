@@ -295,3 +295,78 @@ async fn run_with_shutdown_drains_and_returns() {
   assert!(result.is_ok(), "server task should finish after shutdown");
   assert!(res.starts_with("HTTP/1.1 200"));
 }
+
+#[tokio::test]
+async fn typed_state_is_injected_into_handlers() {
+  /// Fake "database" shared as application state.
+  #[derive(Debug)]
+  struct FakeDb {
+    users: Vec<&'static str>,
+  }
+
+  let db = FakeDb {
+    users: vec!["alice", "bob"],
+  };
+  let mut app = Router::new().with_state(db);
+  app.get("/users/:id", |req: desirable::Request| async move {
+    let db = req
+      .state::<FakeDb>()
+      .ok_or_else(|| desirable::error_msg("state missing"))?;
+    let id: usize = req.param("id")?;
+    db.users
+      .get(id)
+      .map(|name| (*name).to_string())
+      .ok_or_else(|| desirable::error_msg("user not found"))
+  });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  let res = raw_request(addr, &get_request("/users/0")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("alice"), "got: {}", res);
+}
+
+#[tokio::test]
+async fn error_handler_renders_custom_responses() {
+  desirable::set_error_handler(|err| {
+    desirable::Response::builder()
+      .status(err.status())
+      .json(serde_json::json!({
+        "error": err.to_string(),
+        "status": err.status().as_u16(),
+      }))
+  });
+
+  let mut app = Router::new();
+  app.get("/boom", |_| async {
+    Err::<desirable::Response, desirable::Error>(desirable::error_msg("exploded"))
+  });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  let res = raw_request(addr, &get_request("/boom")).await;
+  assert!(res.starts_with("HTTP/1.1 500"), "got: {}", res);
+  assert!(res.contains("application/json"), "got: {}", res);
+  assert!(
+    res.contains("\"error\":\"error msg \\\"exploded\\\"\""),
+    "got: {}",
+    res
+  );
+}
+
+#[tokio::test]
+async fn trailing_slash_matches_registered_route() {
+  let mut app = Router::new();
+  app.get("/users", |_| async { "users" });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Exact match still works.
+  let res = raw_request(addr, &get_request("/users")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+
+  // Trailing slash falls back to the same route.
+  let res = raw_request(addr, &get_request("/users/")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("users"), "got: {}", res);
+}

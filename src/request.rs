@@ -6,6 +6,7 @@ use bytes::Buf;
 use bytes::Bytes;
 use hyper::http::Extensions;
 use route_recognizer::Params;
+use std::any::Any;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -405,6 +406,28 @@ impl Request {
       .filter_map(|part| cookie::Cookie::parse(part.trim()).ok())
       .find(|c| c.name() == name)
       .map(|c| c.into_owned())
+  }
+
+  /// Returns the shared application state set via
+  /// [`Router::with_state`](crate::Router::with_state).
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The concrete state type (must match the type passed to
+  ///   `with_state`)
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// let db = req.state::<DbPool>()?;
+  /// db.query(...).await;
+  /// ```
+  pub fn state<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+    let state = self
+      .inner
+      .extensions()
+      .get::<Arc<dyn Any + Send + Sync>>()?;
+    Arc::clone(state).downcast::<T>().ok()
   }
 }
 
