@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.1] - 2026-09-17
+
+### Changed
+
+- **Documentation:** refreshed README — crates.io/docs.rs/CI badges, a
+  compile-verified quick start with typed state, and an overview of the
+  built-in middleware, error semantics, and graceful shutdown. No code
+  changes.
+
+---
+
 ## [1.7.0] - 2026-07-25
 
 ### Added
