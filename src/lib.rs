@@ -49,7 +49,7 @@ pub use error::Error;
 pub use fs::{ServeDir, ServeFile};
 pub use into_response::IntoResponse;
 pub use kernel::{DynEndpoint, Endpoint, Middleware, Next};
-pub use middleware::{Logger, RequestId, RequestIdValue};
+pub use middleware::{Logger, RequestId, RequestIdValue, Timeout};
 pub use request::Request;
 pub use response::Response;
 pub use router::Router;

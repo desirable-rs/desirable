@@ -34,10 +34,7 @@ async fn spawn_server(router: Router) -> std::net::SocketAddr {
   drop(probe);
 
   tokio::spawn(async move {
-    desirable::new(&addr.to_string())
-      .run(router)
-      .await
-      .unwrap();
+    desirable::new(&addr.to_string()).run(router).await.unwrap();
   });
   // Give the server a moment to bind.
   tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -88,22 +85,27 @@ async fn nested_router_scopes_middleware_and_falls_back_head_to_get() {
   assert_eq!(SCOPED_CALLS.load(Ordering::SeqCst), 1);
 
   // HEAD falls back to the GET route; body is stripped.
-  let head_req = format!(
-    "HEAD /api/users HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-  );
-  let res = raw_request(addr, &head_req).await;
+  let head_req = "HEAD /api/users HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, head_req).await;
   assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
   let body = res.split("\r\n\r\n").nth(1).unwrap_or("");
-  assert!(body.is_empty(), "HEAD body should be empty, got: {:?}", body);
+  assert!(
+    body.is_empty(),
+    "HEAD body should be empty, got: {:?}",
+    body
+  );
   assert_eq!(SCOPED_CALLS.load(Ordering::SeqCst), 2);
 
   // Method mismatch on a nested path still yields 405 with Allow.
-  let post_req = format!(
-    "POST /api/users HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-  );
-  let res = raw_request(addr, &post_req).await;
+  let post_req =
+    "POST /api/users HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, post_req).await;
   assert!(res.starts_with("HTTP/1.1 405"), "got: {}", res);
-  assert!(res.to_ascii_lowercase().contains("allow: get"), "got: {}", res);
+  assert!(
+    res.to_ascii_lowercase().contains("allow: get"),
+    "got: {}",
+    res
+  );
 
   // Unknown path yields 404.
   let res = raw_request(addr, &get_request("/definitely-missing")).await;
@@ -121,5 +123,35 @@ async fn head_falls_back_to_get_on_plain_router() {
   let res = raw_request(addr, head_req).await;
   assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
   let body = res.split("\r\n\r\n").nth(1).unwrap_or("");
-  assert!(body.is_empty(), "HEAD body should be empty, got: {:?}", body);
+  assert!(
+    body.is_empty(),
+    "HEAD body should be empty, got: {:?}",
+    body
+  );
+}
+
+#[tokio::test]
+async fn timeout_middleware_returns_408_for_slow_handlers() {
+  use std::time::Duration;
+
+  async fn slow_handler() -> &'static str {
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    "finally"
+  }
+
+  let mut app = Router::new();
+  app.with(desirable::Timeout::new(Duration::from_millis(50)));
+  app.get("/slow", |_| slow_handler());
+  app.get("/fast", |_| async { "quick" });
+
+  let addr = spawn_server(app).await;
+
+  // Slow handler is aborted at the deadline.
+  let res = raw_request(addr, &get_request("/slow")).await;
+  assert!(res.starts_with("HTTP/1.1 408"), "got: {}", res);
+
+  // Fast handler is unaffected.
+  let res = raw_request(addr, &get_request("/fast")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("quick"), "got: {}", res);
 }

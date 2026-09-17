@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.0] - 2026-07-25
+
+### Fixed
+
+- **`Router::merge()` silently dropped the parent's routes** for any HTTP
+  method registered on both routers (`HashMap::extend` replaced whole route
+  tables). Tables are now appended per method.
+  **Breaking (internal shape):** `Router::routes` is now
+  `HashMap<Method, Vec<route_recognizer::Router<_>>>` — code inspecting the
+  field directly must adapt.
+
+### Changed
+
+- **Middleware is now scoped at registration time** (axum-style ordering):
+  `Router::with()` applies to routes registered *after* it, and that chain
+  travels with the routes through `merge()`. Previously middleware applied to
+  the whole router and was discarded on merge. The built-in 404/405 fallbacks
+  always run the router-level chain. Register `with()` before routes.
+
+### Added
+
+- **`Router::prefix()`** builder for nesting:
+  `app.merge(Router::new().prefix("/api").with(Auth))`.
+- **HEAD requests fall back to GET routes**; the response body is stripped
+  per HTTP semantics. Previously HEAD returned 405 when only GET existed.
+- **`ServeDir` directory index**: when the path resolves to a directory,
+  `index.html` inside it is served.
+- **`Response::set_cookie()` / `remove_cookie()`** with append semantics
+  (multiple `Set-Cookie` headers supported), plus `append_header()` and a
+  public `headers_mut()`.
+- **`Timeout` middleware** aborts requests past the configured duration and
+  responds `408 Request Timeout`.
+
+---
+
 ## [1.3.0] - 2026-07-25
 
 ### Fixed
@@ -108,6 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[1.4.0]: https://github.com/desirable-rs/desirable/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/desirable-rs/desirable/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/desirable-rs/desirable/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/desirable-rs/desirable/compare/v1.0.1...v1.1.0

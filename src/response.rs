@@ -590,7 +590,15 @@ mod tests {
     response.set_cookie(cookie::Cookie::new("a", "1"));
     response.set_cookie(cookie::Cookie::new("b", "2"));
     // Append semantics: both survive.
-    assert_eq!(response.inner.headers().get_all(header::SET_COOKIE).iter().count(), 2);
+    assert_eq!(
+      response
+        .inner
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .count(),
+      2
+    );
   }
 
   #[test]
@@ -608,6 +616,9 @@ mod tests {
     let name = hyper::header::HeaderName::from_static("x-multi");
     response.append_header(name.clone(), hyper::header::HeaderValue::from_static("1"));
     response.append_header(name, hyper::header::HeaderValue::from_static("2"));
-    assert_eq!(response.inner.headers().get_all("x-multi").iter().count(), 2);
+    assert_eq!(
+      response.inner.headers().get_all("x-multi").iter().count(),
+      2
+    );
   }
 }

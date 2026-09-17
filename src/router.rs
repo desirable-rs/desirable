@@ -143,7 +143,11 @@ impl Router {
     if !prefix.is_empty() && !prefix.starts_with('/') {
       prefix.insert(0, '/');
     }
-    self.prefix = if prefix.is_empty() { None } else { Some(prefix) };
+    self.prefix = if prefix.is_empty() {
+      None
+    } else {
+      Some(prefix)
+    };
     self
   }
 
@@ -352,7 +356,11 @@ impl Router {
 
     // HEAD falls back to the GET route table; the body is stripped below.
     let is_head = method == hyper::Method::HEAD;
-    let lookup_method = if is_head { &hyper::Method::GET } else { &method };
+    let lookup_method = if is_head {
+      &hyper::Method::GET
+    } else {
+      &method
+    };
 
     // Fallback handlers run inside the router-level middleware chain; matched
     // routes carry their own (scoped) chain captured at registration.
@@ -364,8 +372,7 @@ impl Router {
       .get(lookup_method)
       .and_then(|tables| tables.iter().find_map(|table| table.recognize(&path).ok()));
 
-    let (endpoint, middlewares): (&DynEndpoint, &[Arc<dyn Middleware>]) = if let Some(m) = matched
-    {
+    let (endpoint, middlewares): (&DynEndpoint, &[Arc<dyn Middleware>]) = if let Some(m) = matched {
       m.params().clone_into(&mut params);
       (&***m.handler(), &[])
     } else {
@@ -382,13 +389,16 @@ impl Router {
 
     req.params = params;
     req.remote_addr = Some(remote_addr);
-    let mut response = Next { endpoint, middlewares }.run(req).await;
+    let mut response = Next {
+      endpoint,
+      middlewares,
+    }
+    .run(req)
+    .await;
 
     // Per HTTP semantics, HEAD responses carry no body.
-    if is_head {
-      if let Ok(res) = &mut response {
-        *res.inner.body_mut() = Full::new(Bytes::new());
-      }
+    if is_head && let Ok(res) = &mut response {
+      *res.inner.body_mut() = Full::new(Bytes::new());
     }
 
     response
@@ -489,8 +499,14 @@ mod tests {
 
   #[test]
   fn test_prefix_builder_normalization() {
-    assert_eq!(Router::new().prefix("/api").prefix, Some("/api".to_string()));
-    assert_eq!(Router::new().prefix("/api/").prefix, Some("/api".to_string()));
+    assert_eq!(
+      Router::new().prefix("/api").prefix,
+      Some("/api".to_string())
+    );
+    assert_eq!(
+      Router::new().prefix("/api/").prefix,
+      Some("/api".to_string())
+    );
     assert_eq!(Router::new().prefix("api").prefix, Some("/api".to_string()));
     assert_eq!(Router::new().prefix("/").prefix, None);
     assert_eq!(Router::new().prefix("").prefix, None);
