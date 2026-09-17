@@ -62,6 +62,33 @@ pub enum Error {
   /// Session error
   #[error("session error {0:?}")]
   Session(#[from] crate::session::SessionError),
+  /// Request body exceeded the configured size limit
+  #[error("request body too large")]
+  BodyTooLarge,
+}
+
+impl Error {
+  /// Returns the HTTP status code that best represents this error.
+  ///
+  /// Client errors (bad parameters, malformed payloads, oversized bodies)
+  /// map to `4xx`; everything else maps to `500 Internal Server Error`.
+  pub fn status(&self) -> hyper::StatusCode {
+    use hyper::StatusCode;
+    match self {
+      Error::MissingParam { .. }
+      | Error::InvalidParam { .. }
+      | Error::Urlencoded(_)
+      | Error::Json(_) => StatusCode::BAD_REQUEST,
+      Error::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+      _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+  }
+
+  /// Returns `true` for server-side errors whose details should not be
+  /// leaked to clients.
+  pub fn is_server_error(&self) -> bool {
+    self.status() == hyper::StatusCode::INTERNAL_SERVER_ERROR
+  }
 }
 
 /// Creates a `MissingParam` error.
@@ -137,7 +164,14 @@ pub fn invalid_param(
 
 impl From<Error> for Response {
   fn from(err: Error) -> Self {
-    Response::with_status(500, err.to_string()).unwrap()
+    let status = err.status();
+    // Never leak internal details for server errors.
+    let body = if err.is_server_error() {
+      "internal server error".to_string()
+    } else {
+      err.to_string()
+    };
+    Response::with_status(status.as_u16(), body).unwrap()
   }
 }
 
@@ -187,5 +221,52 @@ mod tests {
     let display = format!("{}", err);
     assert!(display.contains("missing url param"));
     assert!(display.contains("id"));
+  }
+
+  #[test]
+  fn test_error_status_codes() {
+    use hyper::StatusCode;
+
+    // Client errors map to 4xx.
+    assert_eq!(missing_param("id").status(), StatusCode::BAD_REQUEST);
+    assert_eq!(Error::BodyTooLarge.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let parse_err: std::num::ParseIntError = "x".parse::<u32>().unwrap_err();
+    assert_eq!(
+      invalid_param("age", "u32", parse_err).status(),
+      StatusCode::BAD_REQUEST
+    );
+
+    // Everything else stays a server error.
+    assert_eq!(
+      error_msg("boom").status(),
+      StatusCode::INTERNAL_SERVER_ERROR
+    );
+  }
+
+  #[test]
+  fn test_server_errors_do_not_leak_details() {
+    let response: Response = error_msg("secret-db-password").into();
+    let body = response
+      .inner
+      .body()
+      .clone()
+      .into_inner()
+      .expect("full body has data");
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!text.contains("secret-db-password"));
+    assert_eq!(text, "internal server error");
+  }
+
+  #[test]
+  fn test_client_errors_keep_message() {
+    let response: Response = missing_param("user_id").into();
+    let body = response
+      .inner
+      .body()
+      .clone()
+      .into_inner()
+      .expect("full body has data");
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("user_id"), "got: {}", text);
   }
 }

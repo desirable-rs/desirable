@@ -237,7 +237,11 @@ async fn accept_loop(
           );
           tokio::pin!(conn);
           tokio::select! {
-            _ = &mut conn => {}
+            result = &mut conn => {
+              if let Err(err) = result {
+                warn!("Connection error: {:?}", err);
+              }
+            }
             _ = shutdown.cancelled() => {
               // Stop keep-alive, finish the in-flight request, then exit.
               conn.as_mut().graceful_shutdown();

@@ -104,8 +104,14 @@ where
 
 impl IntoResponse for Error {
   fn into_response(self) -> Result {
-    let val = self.to_string();
-    Response::with_status(500, val)
+    let status = self.status();
+    if self.is_server_error() {
+      // Never leak internal details to clients; log the real error instead.
+      tracing::error!(error = %self, "handler failed");
+      Response::with_status(status.as_u16(), "internal server error".to_string())
+    } else {
+      Response::with_status(status.as_u16(), self.to_string())
+    }
   }
 }
 

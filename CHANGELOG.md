@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.0] - 2026-07-25
+
+### Fixed
+
+- **All errors returned HTTP 500** regardless of cause. Errors now map to
+  proper status codes: missing/invalid parameters, malformed query strings
+  and JSON bodies → `400 Bad Request`; oversized bodies →
+  `413 Payload Too Large`; everything else stays `500`.
+- **Server error details were leaked in response bodies** (e.g. raw
+  `std::io::Error` debug output). 5xx responses now carry a generic
+  `"internal server error"` body while the real error is logged via
+  `tracing::error!`. 4xx responses keep their descriptive messages.
+- **Missing static files returned 500** with leaked IO details. `ServeFile`
+  and `ServeDir` now return a clean `404 Not Found`.
+- **Connection errors were silently swallowed** when a response could not be
+  produced; they are now logged.
+
+### Added
+
+- **`BodyLimit` middleware** rejects oversized request bodies with
+  `413 Payload Too Large` — immediately when `Content-Length` is declared,
+  and at read time (via `http_body_util::Limited`) for chunked bodies.
+- **`RateLimit` middleware** — in-memory per-client-IP token buckets
+  (`RateLimit::per_second(n)` or explicit burst + refill), returning
+  `429 Too Many Requests` with `Retry-After` when exhausted. Zero external
+  dependencies; process-local state.
+- **`Error::status()`** — public method mapping an error to its HTTP status.
+
+---
+
 ## [1.5.0] - 2026-07-25
 
 ### Added
@@ -171,6 +201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[1.6.0]: https://github.com/desirable-rs/desirable/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/desirable-rs/desirable/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/desirable-rs/desirable/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/desirable-rs/desirable/compare/v1.2.0...v1.3.0

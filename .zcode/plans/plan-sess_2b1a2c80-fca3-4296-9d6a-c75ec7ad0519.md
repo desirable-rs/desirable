@@ -1,29 +1,28 @@
-## desirable v1.5.0 — 连接排空、Server API、静态文件缓存
+## desirable v1.6.0 — 错误语义、静态文件 404、BodyLimit、RateLimit
 
-### 1. 真正的优雅关闭（连接排空）
-- accept_loop 中每个连接任务持有 `watch::Receiver<bool>`，任务内 `tokio::select!`：
-  连接完成 vs 关闭信号。信号触发时 `conn.as_mut().graceful_shutdown()` 后继续 poll 排空
-- 用 `tokio_util::task::TaskTracker` 跟踪所有连接任务；shutdown 后 `close()` + `wait().await`（带默认 10s 排空超时，用 tokio::time::timeout 包裹）
-- `run_graceful` = `run_with_shutdown(router, ctrl_c)`
+### 1. 错误语义修复
+- `src/error.rs`：新增 `Error::status()` 方法——MissingParam/InvalidParam/Urlencoded/Json → 400，其余 → 500；新增 `Error::BodyTooLarge` 变体 → 413
+- `src/into_response.rs` 的 `impl IntoResponse for Error`：按 status() 返回；4xx 用错误消息作 body，5xx 用通用 "internal server error" 并 `tracing::error!` 记录真实错误（不泄漏内部细节）
+- `src/error.rs` 的 `From<Error> for Response` 同步修复
 
-### 2. Server API 补全
-- `Server::try_bind(&str) -> Result<Server>`（不 panic）；`bind()` 保持现有 panic 语义
-- `run_with_shutdown(router, impl Future<Output=()> + Send + 'static)` 新方法
-- accept 后 `stream.set_nodelay(true)`（失败仅记录不影响服务）
+### 2. 静态文件 404
+- `src/fs.rs` 的 `serve_file_with_cache`：`tokio::fs::metadata`/`read` 的 NotFound 错误返回 404 响应；其他 IO 错误维持 500
 
-### 3. 静态文件缓存
-- fs.rs 提取共享异步助手 `serve_file_with_cache(path, req)`：
-  读取 metadata（mtime+size）→ 生成弱 ETag `W/"{mtime_secs:x}-{size:x}"` 与 Last-Modified（httpdate 格式化）
-  → If-None-Match 命中或 If-Modified-Since 不早于 mtime → 返回 304（带 ETag/Last-Modified，无 body）
-  → 否则 200 全量响应
-- ServeFile 与 ServeDir 的 call() 统一走该助手（消除重复）
-- `httpdate = "^1"` 加入直接依赖（已在 Cargo.lock，零新增）
+### 3. BodyLimit 中间件（新增 src/middleware/body_limit.rs）
+- `BodyLimit::new(max_bytes)`：Content-Length > 限制 → 立即 413
+- 同时将限制插入 request extensions；`Request::body()/body_json()/form()` 读取限制并用 `http_body_util::Limited` 包裹 collect，超限 → `Error::BodyTooLarge`（413）——覆盖 chunked 场景
+- middleware/mod.rs 与 lib.rs 补导出
 
-### 4. 测试
-- tests/nesting.rs：spawn_server 返回 (addr, JoinHandle)，等待就绪改为轮询 connect 而非固定 sleep
-- 新 e2e 测试：静态文件 304（先 200 拿 ETag，再带 If-None-Match 请求断言 304）
-- 新 e2e 测试：run_with_shutdown 触发后 server 任务正常返回 Ok
+### 4. RateLimit 中间件（新增 src/middleware/rate_limit.rs）
+- `RateLimit::per_second(n)` / `RateLimit::new(capacity, refill_per_sec)`：按 `req.remote_addr` 的 IP 分桶的内存令牌桶（std Mutex<HashMap<IpAddr, Bucket>>，Instant 惰性补充）
+- 超限 → 429 + `Retry-After: 1`
+- 桶数量上限（默认 65536）防内存膨胀，超限时清空全部桶（简单防洪）
+- 补导出
+
+### 5. 小修
+- `src/server.rs`：连接 future 完成结果不再用 `_` 丢弃——错误记 debug/warn 日志
 
 ### 交付
-- 文件：src/server.rs、src/fs.rs、src/lib.rs（如需 re-export）、Cargo.toml(1.5.0)、tests/nesting.rs、CHANGELOG.md
-- 全量验证 test/clippy/fmt/examples；锁文件零新增 crate；无破坏性 API
+- 文件：error.rs、into_response.rs、fs.rs、request.rs、middleware/{body_limit,rate_limit,mod}.rs、lib.rs、server.rs、Cargo.toml(1.6.0)、CHANGELOG.md
+- 单元测试：status() 映射、is_not_modified 无关、令牌桶行为、413/429 e2e（tests/nesting.rs 增补）
+- 全量验证 test/clippy/fmt/examples；零新依赖；无破坏性 API

@@ -164,6 +164,59 @@ async fn timeout_middleware_returns_408_for_slow_handlers() {
 }
 
 #[tokio::test]
+async fn body_limit_returns_413_for_oversized_bodies() {
+  use std::time::Duration;
+
+  let mut app = Router::new();
+  app.with(desirable::BodyLimit::new(16));
+  app.with(desirable::Timeout::new(Duration::from_secs(5)));
+  app.post("/upload", |mut req: desirable::Request| async move {
+    let data: serde_json::Value = req.body_json().await?;
+    let response: desirable::Response = desirable::Response::json(&data);
+    Ok::<desirable::Response, desirable::Error>(response)
+  });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Declared oversized body: rejected before reading.
+  let big_body = "x".repeat(64);
+  let req = format!(
+    "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+    big_body.len(),
+    big_body
+  );
+  let res = raw_request(addr, &req).await;
+  assert!(res.starts_with("HTTP/1.1 413"), "got: {}", res);
+
+  // Small body passes.
+  let req = "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 9\r\nConnection: close\r\n\r\n{\"a\":123}";
+  let res = raw_request(addr, req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+}
+
+#[tokio::test]
+async fn rate_limit_returns_429_when_exhausted() {
+  let mut app = Router::new();
+  app.with(desirable::RateLimit::per_second(2));
+  app.get("/", |_| async { "ok" });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // First two requests pass, third is rejected.
+  let res = raw_request(addr, &get_request("/")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  let res = raw_request(addr, &get_request("/")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  let res = raw_request(addr, &get_request("/")).await;
+  assert!(res.starts_with("HTTP/1.1 429"), "got: {}", res);
+  assert!(
+    res.to_ascii_lowercase().contains("retry-after:"),
+    "got: {}",
+    res
+  );
+}
+
+#[tokio::test]
 async fn static_file_supports_conditional_requests() {
   // Create a temp file to serve.
   let dir = std::env::temp_dir().join(format!("desirable-e2e-{}", std::process::id()));

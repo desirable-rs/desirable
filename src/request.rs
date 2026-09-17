@@ -3,7 +3,7 @@ use crate::HyperRequest;
 use crate::Result;
 use crate::error::{invalid_param, missing_param};
 use bytes::Buf;
-use http_body_util::BodyExt;
+use bytes::Bytes;
 use hyper::http::Extensions;
 use route_recognizer::Params;
 use std::net::SocketAddr;
@@ -132,9 +132,42 @@ impl Request {
     T: serde::de::DeserializeOwned + Send + Sync + 'static,
   {
     let inner = self.inner();
-    let body = inner.collect().await?.aggregate();
-    let payload: T = serde_json::from_reader(body.reader())?;
+    let bytes = Self::collect_body_limited(inner).await?;
+    let payload: T = serde_json::from_reader(bytes.reader())?;
     Ok(payload)
+  }
+
+  /// Collects the request body, honoring a [`BodyLimitValue`] extension when
+  /// the [`crate::BodyLimit`] middleware is installed.
+  ///
+  /// Exceeding the limit yields `Error::BodyTooLarge` (HTTP 413).
+  async fn collect_body_limited(
+    req: &mut HyperRequest,
+  ) -> std::result::Result<Bytes, crate::Error> {
+    use http_body_util::BodyExt as _;
+
+    let limit = req
+      .extensions()
+      .get::<crate::middleware::body_limit::BodyLimitValue>()
+      .map(|l| l.0);
+    let body = req.body_mut();
+    let collected = match limit {
+      Some(max) => http_body_util::Limited::new(body, max)
+        .collect()
+        .await
+        .map_err(|err| {
+          if err
+            .downcast_ref::<http_body_util::LengthLimitError>()
+            .is_some()
+          {
+            crate::Error::BodyTooLarge
+          } else {
+            crate::Error::Any(anyhow::anyhow!("failed to read request body: {err}"))
+          }
+        })?,
+      None => body.collect().await.map_err(crate::Error::Hyper)?,
+    };
+    Ok(collected.to_bytes())
   }
 
   /// Parses the query string into type `T`.
@@ -332,8 +365,7 @@ impl Request {
     T: serde::de::DeserializeOwned,
   {
     let inner = self.inner();
-    let mut body = inner.collect().await?.aggregate();
-    let bytes = body.copy_to_bytes(body.remaining());
+    let bytes = Self::collect_body_limited(inner).await?;
     Ok(serde_urlencoded::from_bytes(&bytes)?)
   }
 

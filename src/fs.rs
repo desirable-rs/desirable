@@ -117,7 +117,14 @@ impl Endpoint for ServeFile {
 /// than the file's modification time and no `If-None-Match` is present),
 /// responds `304 Not Modified` with an empty body.
 async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
-  let meta = tokio::fs::metadata(path).await?;
+  // A missing file is a client-visible 404, not a server error.
+  let meta = match tokio::fs::metadata(path).await {
+    Ok(meta) => meta,
+    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+      return Response::with_status(404, "not found".to_string());
+    }
+    Err(err) => return Err(err.into()),
+  };
   let modified = meta.modified()?;
   let mtime_secs = modified
     .duration_since(UNIX_EPOCH)
@@ -136,7 +143,13 @@ async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
     return Ok(response.into());
   }
 
-  let body = tokio::fs::read(path).await?;
+  let body = match tokio::fs::read(path).await {
+    Ok(body) => body,
+    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+      return Response::with_status(404, "not found".to_string());
+    }
+    Err(err) => return Err(err.into()),
+  };
   let mime = mime_for_path(path);
   let response = hyper::Response::builder()
     .header(header::CONTENT_TYPE, mime)
