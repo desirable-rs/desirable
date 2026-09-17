@@ -205,6 +205,52 @@ impl Response {
     self.inner.headers_mut().insert(key, value);
   }
 
+  /// Appends a header without replacing existing values.
+  ///
+  /// Unlike [`Response::set_header`] (which replaces), this keeps previously
+  /// set values — required for headers that may repeat, such as `Set-Cookie`.
+  pub fn append_header(
+    &mut self,
+    key: hyper::header::HeaderName,
+    value: hyper::header::HeaderValue,
+  ) {
+    self.inner.headers_mut().append(key, value);
+  }
+
+  /// Returns a mutable reference to the response headers.
+  pub fn headers_mut(&mut self) -> &mut hyper::HeaderMap {
+    self.inner.headers_mut()
+  }
+
+  /// Attaches a cookie to the response via the `Set-Cookie` header.
+  ///
+  /// Uses append semantics, so multiple cookies can be set.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// let cookie = cookie::Cookie::build(("theme", "dark")).path("/").into();
+  /// response.set_cookie(cookie);
+  /// ```
+  pub fn set_cookie(&mut self, cookie: cookie::Cookie<'static>) {
+    let value = cookie
+      .to_string()
+      .parse()
+      .expect("cookie string is a valid header value");
+    self.append_header(hyper::header::SET_COOKIE, value);
+  }
+
+  /// Attaches a cookie that instructs the client to delete `name`.
+  ///
+  /// The cookie is sent with `Max-Age=0` and an empty value.
+  pub fn remove_cookie(&mut self, name: &str) {
+    let cookie = cookie::Cookie::build((name.to_string(), ""))
+      .max_age(time::Duration::ZERO)
+      .path("/")
+      .build();
+    self.set_cookie(cookie);
+  }
+
   /// Builder-style header setter. Consumes self and returns Self for chaining.
   ///
   /// # Arguments
@@ -525,5 +571,43 @@ mod tests {
       response.inner.headers().get(header::CONTENT_TYPE).unwrap(),
       "text/html; charset=utf-8"
     );
+  }
+
+  #[test]
+  fn test_response_set_cookie() {
+    let mut response = Response::body("test").unwrap();
+    let cookie = cookie::Cookie::build(("theme", "dark")).path("/").build();
+    response.set_cookie(cookie);
+    assert_eq!(
+      response.inner.headers().get(header::SET_COOKIE).unwrap(),
+      "theme=dark; Path=/"
+    );
+  }
+
+  #[test]
+  fn test_response_set_multiple_cookies() {
+    let mut response = Response::body("test").unwrap();
+    response.set_cookie(cookie::Cookie::new("a", "1"));
+    response.set_cookie(cookie::Cookie::new("b", "2"));
+    // Append semantics: both survive.
+    assert_eq!(response.inner.headers().get_all(header::SET_COOKIE).iter().count(), 2);
+  }
+
+  #[test]
+  fn test_response_remove_cookie() {
+    let mut response = Response::body("test").unwrap();
+    response.remove_cookie("session");
+    let value = response.inner.headers().get(header::SET_COOKIE).unwrap();
+    assert!(value.to_str().unwrap().starts_with("session=;"));
+    assert!(value.to_str().unwrap().contains("Max-Age=0"));
+  }
+
+  #[test]
+  fn test_response_append_header() {
+    let mut response = Response::body("test").unwrap();
+    let name = hyper::header::HeaderName::from_static("x-multi");
+    response.append_header(name.clone(), hyper::header::HeaderValue::from_static("1"));
+    response.append_header(name, hyper::header::HeaderValue::from_static("2"));
+    assert_eq!(response.inner.headers().get_all("x-multi").iter().count(), 2);
   }
 }
