@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.9.0] - 2026-09-18
+
+### Fixed
+
+- **Session cookies were truncated at base64 padding.** `get_cookie_value`
+  split on every `=`, so a signed cookie value ending in `=` padding (the
+  common case for base64) lost its tail and failed signature verification —
+  silently starting a new session. Values are now taken whole via
+  `split_once`. Also removes a per-request (per-segment!) `format!`
+  allocation from the lookup.
+
+### Changed
+
+- **`Router::dispatch` no longer allocates per request**: the method-clone
+  and path-`String` allocations were removed in favor of scoped borrows.
+- **Static files are opened once**: `metadata` + `read` (two path lookups)
+  became a single `File::open` + `fstat` + `read_to_end`, also narrowing the
+  stat/read race window.
+- Internal status-code construction no longer re-parses `u16` literals
+  (new crate-internal `Response::with_status_code`); static `HeaderValue`
+  constants are passed by reference instead of cloned.
+- **Architecture:** the 1,620-line `session.rs` module was split into
+  `session/{mod,config,data,error,manager}.rs` (public paths unchanged);
+  duplicate content-type constants were unified in `response.rs`; six
+  duplicated response-builder chains in `into_response.rs` now share one
+  helper.
+
+### Deprecated
+
+- **`desirable::utils`** — an empty placeholder module since 1.0. It will be
+  removed in 2.0.
+
+---
+
 ## [1.8.0] - 2026-09-17
 
 ### Added
@@ -257,6 +291,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[1.9.0]: https://github.com/desirable-rs/desirable/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/desirable-rs/desirable/compare/v1.7.1...v1.8.0
 [1.7.1]: https://github.com/desirable-rs/desirable/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0

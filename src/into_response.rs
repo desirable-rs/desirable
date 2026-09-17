@@ -1,16 +1,9 @@
+use crate::response::{CONTENT_TYPE_OCTET, CONTENT_TYPE_TEXT};
 use crate::{Error, Result};
 use bytes::{Bytes, BytesMut};
 use http_body_util::Full;
 use hyper::header;
 use std::borrow::Cow;
-
-/// Cached content-type header value for plain text responses.
-static CONTENT_TYPE_TEXT: header::HeaderValue =
-  header::HeaderValue::from_static("text/plain; charset=utf-8");
-
-/// Cached content-type header value for octet-stream responses.
-static CONTENT_TYPE_OCTET: header::HeaderValue =
-  header::HeaderValue::from_static("application/octet-stream");
 
 /// Trait for types that can be converted into an HTTP response.
 ///
@@ -59,10 +52,24 @@ pub trait IntoResponse {
   fn into_response(self) -> Result;
 }
 
+/// Shared constructor for the builtin `IntoResponse` impls: builds a
+/// response with an optional static content-type and a full body.
+fn build_response(
+  status: hyper::StatusCode,
+  content_type: Option<&'static header::HeaderValue>,
+  body: impl Into<Full<Bytes>>,
+) -> Result {
+  let mut builder = hyper::http::Response::builder().status(status);
+  if let Some(ct) = content_type {
+    builder = builder.header(header::CONTENT_TYPE, ct);
+  }
+  let response = builder.body(body.into())?.into();
+  Ok(response)
+}
+
 impl IntoResponse for Full<Bytes> {
   fn into_response(self) -> Result {
-    let response = hyper::http::Response::builder().body(self)?.into();
-    Ok(response)
+    build_response(hyper::StatusCode::OK, None, self)
   }
 }
 
@@ -110,54 +117,33 @@ impl IntoResponse for Error {
 
 impl IntoResponse for () {
   fn into_response(self) -> Result {
-    let response = hyper::http::Response::builder()
-      .body(Full::new(Bytes::default()))?
-      .into();
-    Ok(response)
+    build_response(hyper::StatusCode::OK, None, Bytes::new())
   }
 }
 
 impl IntoResponse for (hyper::StatusCode, String) {
   fn into_response(self) -> Result {
-    let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
-      .status(self.0)
-      .body(Full::new(Bytes::from(self.1)))?
-      .into();
-    Ok(response)
+    build_response(self.0, Some(&CONTENT_TYPE_TEXT), Bytes::from(self.1))
   }
 }
 
 impl IntoResponse for (hyper::StatusCode, &'static str) {
   fn into_response(self) -> Result {
-    let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
-      .status(self.0)
-      .body(Full::new(Bytes::from(self.1)))?
-      .into();
-    Ok(response)
+    build_response(self.0, Some(&CONTENT_TYPE_TEXT), Bytes::from(self.1))
   }
 }
 
 impl IntoResponse for (u16, String) {
   fn into_response(self) -> Result {
-    let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
-      .status(hyper::StatusCode::from_u16(self.0)?)
-      .body(Full::new(Bytes::from(self.1)))?
-      .into();
-    Ok(response)
+    let status = hyper::StatusCode::from_u16(self.0)?;
+    build_response(status, Some(&CONTENT_TYPE_TEXT), Bytes::from(self.1))
   }
 }
 
 impl IntoResponse for (u16, &'static str) {
   fn into_response(self) -> Result {
-    let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
-      .status(hyper::StatusCode::from_u16(self.0)?)
-      .body(Full::new(Bytes::from(self.1)))?
-      .into();
-    Ok(response)
+    let status = hyper::StatusCode::from_u16(self.0)?;
+    build_response(status, Some(&CONTENT_TYPE_TEXT), Bytes::from(self.1))
   }
 }
 

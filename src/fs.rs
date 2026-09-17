@@ -4,6 +4,7 @@ use http_body_util::Full;
 use hyper::header;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncReadExt as _;
 
 /// Returns the MIME type for a file based on its extension.
 ///
@@ -117,14 +118,19 @@ impl Endpoint for ServeFile {
 /// than the file's modification time and no `If-None-Match` is present),
 /// responds `304 Not Modified` with an empty body.
 async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
-  // A missing file is a client-visible 404, not a server error.
-  let meta = match tokio::fs::metadata(path).await {
-    Ok(meta) => meta,
+  // Open once; metadata comes from the open handle (fstat) instead of a
+  // second path lookup. A missing file is a client-visible 404.
+  let mut file = match tokio::fs::File::open(path).await {
+    Ok(file) => file,
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-      return Response::with_status(404, "not found".to_string());
+      return Ok(Response::with_status_code(
+        hyper::StatusCode::NOT_FOUND,
+        "not found".to_string(),
+      ));
     }
     Err(err) => return Err(err.into()),
   };
+  let meta = file.metadata().await?;
   let modified = meta.modified()?;
   let mtime_secs = modified
     .duration_since(UNIX_EPOCH)
@@ -143,13 +149,13 @@ async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
     return Ok(response.into());
   }
 
-  let body = match tokio::fs::read(path).await {
-    Ok(body) => body,
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+  let mut body = Vec::with_capacity(meta.len() as usize);
+  if let Err(err) = file.read_to_end(&mut body).await {
+    if err.kind() == std::io::ErrorKind::NotFound {
       return Response::with_status(404, "not found".to_string());
     }
-    Err(err) => return Err(err.into()),
-  };
+    return Err(err.into());
+  }
   let mime = mime_for_path(path);
   let response = hyper::Response::builder()
     .header(header::CONTENT_TYPE, mime)
@@ -266,7 +272,12 @@ impl Endpoint for ServeDir {
     let file = req.param_str("file")?;
     let resolved = match resolve_within(&self.dir, &file) {
       Some(path) => path,
-      None => return Response::with_status(403, "Forbidden".to_string()),
+      None => {
+        return Ok(Response::with_status_code(
+          hyper::StatusCode::FORBIDDEN,
+          "Forbidden".to_string(),
+        ));
+      }
     };
     let resolved = with_dir_index(resolved).await;
     serve_file_with_cache(&req, &resolved).await

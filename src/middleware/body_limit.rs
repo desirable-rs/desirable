@@ -50,7 +50,10 @@ impl Middleware for BodyLimit {
       .and_then(|v| v.parse::<usize>().ok())
       && len > self.max_bytes
     {
-      return Response::with_status(413, "payload too large".to_string());
+      return Ok(Response::with_status_code(
+        hyper::StatusCode::PAYLOAD_TOO_LARGE,
+        "payload too large".to_string(),
+      ));
     }
 
     // Slow path: cap the actual read when the body is buffered later.

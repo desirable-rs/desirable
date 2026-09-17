@@ -44,13 +44,18 @@ pub(crate) fn render_error(err: Error) -> Response {
 }
 
 fn default_render_error(err: Error) -> Response {
+  use hyper::StatusCode;
+
   let status = err.status();
   if err.is_server_error() {
     // Never leak internal details to clients; log the real error instead.
     tracing::error!(error = %err, "handler failed");
-    Response::with_status(status.as_u16(), "internal server error".to_string()).unwrap()
+    Response::with_status_code(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      "internal server error".to_string(),
+    )
   } else {
-    Response::with_status(status.as_u16(), err.to_string()).unwrap()
+    Response::with_status_code(status, err.to_string())
   }
 }
 

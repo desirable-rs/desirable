@@ -5,21 +5,19 @@ use hyper::StatusCode;
 use hyper::header;
 
 /// Cached content-type header value for JSON responses.
-static CONTENT_TYPE_JSON: header::HeaderValue =
+pub(crate) static CONTENT_TYPE_JSON: header::HeaderValue =
   header::HeaderValue::from_static("application/json");
 
 /// Cached content-type header value for plain text responses.
-static CONTENT_TYPE_TEXT: header::HeaderValue =
+pub(crate) static CONTENT_TYPE_TEXT: header::HeaderValue =
   header::HeaderValue::from_static("text/plain; charset=utf-8");
 
 /// Cached content-type header value for HTML responses.
-static CONTENT_TYPE_HTML: header::HeaderValue =
+pub(crate) static CONTENT_TYPE_HTML: header::HeaderValue =
   header::HeaderValue::from_static("text/html; charset=utf-8");
 
 /// Cached content-type header value for octet-stream responses.
-/// Currently unused but kept for potential future byte-based responses.
-#[allow(dead_code)]
-static CONTENT_TYPE_OCTET: header::HeaderValue =
+pub(crate) static CONTENT_TYPE_OCTET: header::HeaderValue =
   header::HeaderValue::from_static("application/octet-stream");
 
 /// The HTTP response type for the desirable framework.
@@ -97,12 +95,19 @@ impl Response {
   /// Response::with_status(404, "Not Found".to_string())
   /// ```
   pub fn with_status(status: u16, val: String) -> Result<Self> {
-    let response = hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
-      .status(StatusCode::from_u16(status)?)
-      .body(Full::new(Bytes::from(val)))?
-      .into();
-    Ok(response)
+    let status = StatusCode::from_u16(status)?;
+    Ok(Self::with_status_code(status, val))
+  }
+
+  /// Creates a text response with a specific status code — without the
+  /// per-call `u16` validation of [`Response::with_status`].
+  pub(crate) fn with_status_code(status: StatusCode, val: String) -> Self {
+    hyper::http::Response::builder()
+      .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
+      .status(status)
+      .body(Full::new(Bytes::from(val)))
+      .expect("static status and content-type cannot fail to build")
+      .into()
   }
 
   /// Creates a JSON response with the given serializable payload.
@@ -139,7 +144,7 @@ impl Response {
   pub fn json<T: serde::Serialize>(payload: T) -> Self {
     let data = serde_json::to_vec(&payload).expect("JSON serialization failed");
     hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, CONTENT_TYPE_JSON.clone())
+      .header(header::CONTENT_TYPE, &CONTENT_TYPE_JSON)
       .body(Full::new(Bytes::from(data)))
       .unwrap()
       .into()
@@ -158,7 +163,7 @@ impl Response {
   /// ```
   pub fn html(body: impl Into<String>) -> Self {
     hyper::http::Response::builder()
-      .header(header::CONTENT_TYPE, CONTENT_TYPE_HTML.clone())
+      .header(header::CONTENT_TYPE, &CONTENT_TYPE_HTML)
       .body(Full::new(Bytes::from(body.into())))
       .unwrap()
       .into()
@@ -345,7 +350,7 @@ impl ResponseBuilder {
   {
     let response = self
       .inner
-      .header(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone())
+      .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
       .body(Full::new(Bytes::from(body)))?
       .into();
     Ok(response)
@@ -360,7 +365,7 @@ impl ResponseBuilder {
     let data = serde_json::to_vec(&payload).expect("JSON serialization failed");
     self
       .inner
-      .header(header::CONTENT_TYPE, CONTENT_TYPE_JSON.clone())
+      .header(header::CONTENT_TYPE, &CONTENT_TYPE_JSON)
       .body(Full::new(Bytes::from(data)))
       .unwrap()
       .into()
@@ -418,7 +423,7 @@ impl From<&'static str> for Response {
 
 impl From<anyhow::Error> for Response {
   fn from(e: anyhow::Error) -> Self {
-    Response::with_status(500, e.to_string()).unwrap()
+    Response::with_status_code(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
   }
 }
 

@@ -376,25 +376,28 @@ impl Router {
   ///
   /// The response from the matched handler or an error
   pub async fn dispatch(&self, mut req: Request, remote_addr: Arc<SocketAddr>) -> Result {
-    let method = req.method().clone();
-    let path = req.uri().path().to_string();
-
     let mut params = route_recognizer::Params::new();
 
     // HEAD falls back to the GET route table; the body is stripped below.
-    let is_head = method == hyper::Method::HEAD;
-    let lookup_method = if is_head {
-      &hyper::Method::GET
-    } else {
-      &method
-    };
+    let is_head = *req.method() == hyper::Method::HEAD;
 
     // Fallback handlers run inside the router-level middleware chain; matched
     // routes carry their own (scoped) chain captured at registration.
     let not_found: &DynEndpoint = &*self.not_found_handler;
     let not_allowed: &DynEndpoint = &*self.method_not_allowed_handler;
 
-    let matched = self.match_path(lookup_method, &path);
+    // Match by borrowing the method and path — both matchers only borrow
+    // `self`, so the borrows end before `req` is mutated below and no
+    // per-request allocation is needed.
+    let matched = {
+      let lookup_method: &hyper::Method = if is_head {
+        &hyper::Method::GET
+      } else {
+        req.method()
+      };
+      let path = req.uri().path();
+      self.match_path(lookup_method, path)
+    };
 
     let (endpoint, middlewares): (&DynEndpoint, &[Arc<dyn Middleware>]) =
       if let Some((handler, matched_params)) = matched {
@@ -403,7 +406,10 @@ impl Router {
       } else {
         // No route for this method. If the path exists under other methods,
         // respond 405 Method Not Allowed; otherwise fall back to 404.
-        let methods = self.matching_methods(&path);
+        let methods = {
+          let path = req.uri().path();
+          self.matching_methods(path)
+        };
         if methods.is_empty() {
           (not_found, &self.middlewares)
         } else {

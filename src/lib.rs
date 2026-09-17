@@ -42,6 +42,10 @@ pub mod router;
 pub mod server;
 pub mod session;
 pub mod types;
+#[deprecated(
+  since = "1.9.0",
+  note = "this module has never contained any code and will be removed in 2.0"
+)]
 pub mod utils;
 
 pub use cors::Cors;
