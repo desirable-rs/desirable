@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8.0] - 2026-09-17
+
+### Added
+
+- **`SessionLayer` middleware** — automatic session management. Install with
+  `app.with(SessionLayer::new(manager))`; handlers read and mutate
+  `req.session()` (a cloneable handle dereferencing to `Mutex<Session>`).
+  The session is loaded from its signed cookie per request, and `Set-Cookie`
+  is appended to the response **only when the session was modified** —
+  anonymous traffic produces no cookie. Missing/empty cookies start a fresh
+  session; tampered cookies are logged and replaced rather than failing the
+  request.
+- **`Request::session()`** — returns the `SessionHandle`; without the layer
+  installed it resolves to a detached no-op session (debug-logged) instead
+  of panicking.
+
+---
+
 ## [1.7.1] - 2026-09-17
 
 ### Changed
@@ -238,6 +256,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[1.8.0]: https://github.com/desirable-rs/desirable/compare/v1.7.1...v1.8.0
+[1.7.1]: https://github.com/desirable-rs/desirable/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/desirable-rs/desirable/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/desirable-rs/desirable/compare/v1.4.0...v1.5.0

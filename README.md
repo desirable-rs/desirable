@@ -44,6 +44,20 @@ async fn main() -> Result<()> {
 
 ## Highlights
 
+**Handlers** — plain functions or closures. To use `?` in a handler, write it
+as a named `async fn` returning `desirable::Result`; the concrete return type
+lets inference do the rest (anonymous `async move` blocks need a
+`Result`-turbofish):
+
+```rust,ignore
+async fn get_user(req: Request) -> Result {
+    let id: i32 = req.param("id")?;
+    let user = load_user(id).await?;
+    Ok(desirable::Response::json(user))
+}
+app.get("/users/:id", |req: Request| get_user(req));
+```
+
 **Routing** — path parameters, all HTTP methods, trailing-slash tolerance, correct `404`/`405 + Allow` semantics:
 
 ```rust,ignore
@@ -73,7 +87,19 @@ let db = req.state::<DbPool>()?;
 
 **Static files** — `ServeFile` / `ServeDir` with extension-based `Content-Type`, directory `index.html` fallback, path-traversal protection, and conditional-request support (`ETag`, `Last-Modified`, `304 Not Modified`).
 
-**Sessions** — HMAC-SHA256 signed cookies with a full builder (`SessionConfig::new(key).secure(true).max_age_secs(86400)`).
+**Sessions** — one line to enable; handlers mutate `req.session()` and the
+`Set-Cookie` header is emitted automatically, only when the session changed.
+Cookies are HMAC-SHA256 signed (tamper-proof), configurable via
+`SessionConfig::new(key).secure(true).max_age_secs(86400)`:
+
+```rust,ignore
+app.with(SessionLayer::new(SessionManager::new(config)));
+
+app.post("/login", |req: Request| async move {
+    req.session().lock().unwrap().insert("user_id", 42)?;
+    Ok::<_, desirable::Error>("logged in".into())
+});
+```
 
 **Sensible errors** — client mistakes map to `400`, oversized bodies to `413`; `5xx` bodies never leak internals (they're logged instead). Render all errors your way with `set_error_handler(|err| ...)`.
 

@@ -398,7 +398,11 @@ async fn session_layer_roundtrip_and_tamper_handling() {
   let res = raw_request(addr, &get_request("/me")).await;
   assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
   assert!(res.ends_with("anonymous"), "got: {}", res);
-  assert!(!res.to_ascii_lowercase().contains("set-cookie"), "got: {}", res);
+  assert!(
+    !res.to_ascii_lowercase().contains("set-cookie"),
+    "got: {}",
+    res
+  );
 
   // (a) Modified session: response carries Set-Cookie.
   let body = r#""alice""#;
@@ -423,7 +427,11 @@ async fn session_layer_roundtrip_and_tamper_handling() {
     .unwrap_or_default()
     .trim()
     .to_string();
-  assert!(cookie_pair.starts_with("desirable_session="), "got: {}", cookie_pair);
+  assert!(
+    cookie_pair.starts_with("desirable_session="),
+    "got: {}",
+    cookie_pair
+  );
 
   // (b) Cookie roundtrip: session value readable on the next request.
   let req = format!(
@@ -435,10 +443,8 @@ async fn session_layer_roundtrip_and_tamper_handling() {
   assert!(res.ends_with("known"), "got: {}", res);
 
   // (c) Tampered cookie: fresh session, request still succeeds.
-  let req = format!(
-    "GET /me HTTP/1.1\r\nHost: localhost\r\nCookie: desirable_session=GARBAGEVALUE\r\nConnection: close\r\n\r\n"
-  );
-  let res = raw_request(addr, &req).await;
+  let req = "GET /me HTTP/1.1\r\nHost: localhost\r\nCookie: desirable_session=GARBAGEVALUE\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, req).await;
   assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
   assert!(res.ends_with("anonymous"), "got: {}", res);
 }
