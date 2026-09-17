@@ -3,6 +3,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::header;
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Returns the MIME type for a file based on its extension.
 ///
@@ -99,16 +100,72 @@ impl Endpoint for ServeFile {
   ///
   /// # Returns
   ///
-  /// The file contents as a response with a Content-Type header inferred
-  /// from the file extension, or an error
-  async fn call(&self, _req: Request) -> Result {
-    let body = tokio::fs::read(&self.path).await?;
-    let mime = mime_for_path(&self.path);
-    let response = hyper::Response::builder()
-      .header(header::CONTENT_TYPE, mime)
-      .body(Full::new(Bytes::from(body)))?;
-    Ok(response.into())
+  /// The file contents as a response with `Content-Type`, `ETag`, and
+  /// `Last-Modified` headers, or `304 Not Modified` when conditional request
+  /// headers allow it, or an error
+  async fn call(&self, req: Request) -> Result {
+    serve_file_with_cache(&req, &self.path).await
   }
+}
+
+/// Builds a response for the file at `path`, honoring HTTP conditional
+/// requests.
+///
+/// Always sets `Content-Type` (from the extension), `ETag`
+/// (`W/"{mtime_secs:x}-{size:x}"`), and `Last-Modified`. When the request's
+/// `If-None-Match` matches the ETag (or `If-Modified-Since` is not earlier
+/// than the file's modification time and no `If-None-Match` is present),
+/// responds `304 Not Modified` with an empty body.
+async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
+  let meta = tokio::fs::metadata(path).await?;
+  let modified = meta.modified()?;
+  let mtime_secs = modified
+    .duration_since(UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or(0);
+  let etag = format!("W/\"{:x}-{:x}\"", mtime_secs, meta.len());
+  let last_modified = httpdate::fmt_http_date(modified);
+
+  let not_modified = is_not_modified(req, &etag, modified);
+  if not_modified {
+    let response = hyper::Response::builder()
+      .status(hyper::StatusCode::NOT_MODIFIED)
+      .header(header::ETAG, etag.as_str())
+      .header(header::LAST_MODIFIED, last_modified)
+      .body(Full::new(Bytes::new()))?;
+    return Ok(response.into());
+  }
+
+  let body = tokio::fs::read(path).await?;
+  let mime = mime_for_path(path);
+  let response = hyper::Response::builder()
+    .header(header::CONTENT_TYPE, mime)
+    .header(header::ETAG, etag.as_str())
+    .header(header::LAST_MODIFIED, last_modified)
+    .body(Full::new(Bytes::from(body)))?;
+  Ok(response.into())
+}
+
+/// Evaluates the request's conditional headers against the file state.
+fn is_not_modified(req: &Request, etag: &str, modified: SystemTime) -> bool {
+  // If-None-Match takes precedence over If-Modified-Since.
+  if let Some(inm) = req.header("if-none-match").and_then(|v| v.to_str().ok()) {
+    return inm
+      .split(',')
+      .any(|candidate| {
+        let candidate = candidate.trim();
+        candidate == "*" || candidate == etag || candidate == etag.trim_start_matches("W/")
+      });
+  }
+  if let Some(ims) = req
+    .header("if-modified-since")
+    .and_then(|v| v.to_str().ok())
+  {
+    if let Ok(since) = httpdate::parse_http_date(ims) {
+      return modified <= since;
+    }
+  }
+  false
 }
 
 /// Returns the file to serve: `path` itself, or `path/index.html` when the
@@ -186,7 +243,9 @@ impl Endpoint for ServeDir {
   ///
   /// # Returns
   ///
-  /// The requested file as a response with an inferred Content-Type header
+  /// The requested file as a response with `Content-Type`, `ETag`, and
+  /// `Last-Modified` headers, or `304 Not Modified` when conditional request
+  /// headers allow it
   ///
   /// # Errors
   ///
@@ -200,12 +259,7 @@ impl Endpoint for ServeDir {
       None => return Response::with_status(403, "Forbidden".to_string()),
     };
     let resolved = with_dir_index(resolved).await;
-    let body = tokio::fs::read(resolved.clone()).await?;
-    let mime = mime_for_path(&resolved);
-    let response = hyper::Response::builder()
-      .header(header::CONTENT_TYPE, mime)
-      .body(Full::new(Bytes::from(body)))?;
-    Ok(response.into())
+    serve_file_with_cache(&req, &resolved).await
   }
 }
 

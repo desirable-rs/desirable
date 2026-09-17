@@ -26,19 +26,26 @@ impl Middleware for ScopedTag {
   }
 }
 
-/// Spawns a server on an ephemeral port and returns its address.
-async fn spawn_server(router: Router) -> std::net::SocketAddr {
+/// Spawns a server on an ephemeral port and returns its address plus the
+/// server's task handle, once the listener is actually accepting connections.
+async fn spawn_server(router: Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
   // Reserve a free port, release it, then hand it to the server.
   let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
   let addr = probe.local_addr().unwrap();
   drop(probe);
 
-  tokio::spawn(async move {
+  let handle = tokio::spawn(async move {
     desirable::new(&addr.to_string()).run(router).await.unwrap();
   });
-  // Give the server a moment to bind.
-  tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-  addr
+
+  // Wait until the port accepts connections instead of guessing a delay.
+  for _ in 0..100 {
+    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+      return (addr, handle);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+  panic!("server did not start listening within 1s");
 }
 
 /// Sends a raw HTTP request and returns the full response text.
@@ -70,7 +77,7 @@ async fn nested_router_scopes_middleware_and_falls_back_head_to_get() {
   app.get("/plain", |_| async { "plain" });
   app.merge(api);
 
-  let addr = spawn_server(app).await;
+  let (addr, _server) = spawn_server(app).await;
 
   // Nested route: scoped middleware applied.
   let res = raw_request(addr, &get_request("/api/users")).await;
@@ -117,7 +124,7 @@ async fn head_falls_back_to_get_on_plain_router() {
   let mut app = Router::new();
   app.get("/health", |_| async { "healthy" });
 
-  let addr = spawn_server(app).await;
+  let (addr, _server) = spawn_server(app).await;
 
   let head_req = "HEAD /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
   let res = raw_request(addr, head_req).await;
@@ -144,7 +151,7 @@ async fn timeout_middleware_returns_408_for_slow_handlers() {
   app.get("/slow", |_| slow_handler());
   app.get("/fast", |_| async { "quick" });
 
-  let addr = spawn_server(app).await;
+  let (addr, _server) = spawn_server(app).await;
 
   // Slow handler is aborted at the deadline.
   let res = raw_request(addr, &get_request("/slow")).await;
@@ -154,4 +161,84 @@ async fn timeout_middleware_returns_408_for_slow_handlers() {
   let res = raw_request(addr, &get_request("/fast")).await;
   assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
   assert!(res.ends_with("quick"), "got: {}", res);
+}
+
+#[tokio::test]
+async fn static_file_supports_conditional_requests() {
+  // Create a temp file to serve.
+  let dir = std::env::temp_dir().join(format!("desirable-e2e-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  let file_path = dir.join("app.js");
+  std::fs::write(&file_path, b"console.log(1);").unwrap();
+
+  let mut app = Router::new();
+  app.get("/static/*file", desirable::ServeDir::new(dir.clone()));
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // First request: full response with ETag and Last-Modified.
+  let res = raw_request(addr, &get_request("/static/app.js")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.contains("etag: W/"), "got: {}", res);
+  assert!(res.contains("last-modified:"), "got: {}", res);
+  assert!(res.contains("text/javascript"), "got: {}", res);
+
+  let etag = res
+    .lines()
+    .find(|l| l.to_ascii_lowercase().starts_with("etag:"))
+    .and_then(|l| l.split(':').nth(1))
+    .unwrap_or_default()
+    .trim()
+    .to_string();
+  assert!(!etag.is_empty());
+
+  // Second request with If-None-Match: 304, empty body.
+  let conditional = format!(
+    "GET /static/app.js HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: {}\r\nConnection: close\r\n\r\n",
+    etag
+  );
+  let res = raw_request(addr, &conditional).await;
+  assert!(res.starts_with("HTTP/1.1 304"), "got: {}", res);
+  let body = res.split("\r\n\r\n").nth(1).unwrap_or("");
+  assert!(body.is_empty(), "304 body should be empty, got: {:?}", body);
+
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn run_with_shutdown_drains_and_returns() {
+  let mut app = Router::new();
+  app.get("/", |_| async { "hello" });
+
+  let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = probe.local_addr().unwrap();
+  drop(probe);
+
+  let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+  let server = desirable::Server::try_bind(&addr.to_string()).unwrap();
+  let server_task = tokio::spawn(async move {
+    server
+      .run_with_shutdown(app, async move {
+        let _ = rx.await;
+      })
+      .await
+      .unwrap();
+  });
+
+  // Wait for readiness, trigger shutdown, and confirm the server returns.
+  for _ in 0..100 {
+    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+
+  // Serve one request before shutting down.
+  let res = raw_request(addr, &get_request("/")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+
+  tx.send(()).unwrap();
+  let result = tokio::time::timeout(std::time::Duration::from_secs(5), server_task).await;
+  assert!(result.is_ok(), "server task should finish after shutdown");
+  assert!(res.starts_with("HTTP/1.1 200"));
 }
