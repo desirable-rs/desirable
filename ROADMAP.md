@@ -23,27 +23,94 @@ arrives.
 | 1.10.0 | Middleware hot paths | Cors precomputed header values, borrowing session-cookie lookup, no redundant stat for static files, wrapper-free routes without middleware, allocation-free RequestId generation |
 | 2.0.0 | Streaming bodies | Concrete `Body` enum (`Full` / `Streaming`), `Body::stream` + `Body::channel` (SSE-capable), static files stream by default with exact `Content-Length`; `utils` removed |
 
-## Deferred (conscious trade-offs)
+## Roadmap: 2.x → 3.0
 
-| Item | Why deferred |
-|------|--------------|
-| WebSocket | Needs a protocol-upgrade stack (hyper upgrades or tungstenite). Large, self-contained project. The 2.0 streaming `Body::channel` removes the biggest prerequisite. |
-| TLS (rustls) | Needs certificate configuration surface plus an acceptor layer. Common production answer today is terminating TLS at a reverse proxy. |
-| HTTP/2 | Requires rewiring the server layer onto hyper's h2 service. |
-| Compression middleware (gzip) | Requires adding `async-compression` — the first new direct dependency. Conflicts with the zero-new-deps principle; acceptable behind a cargo feature flag if demand appears. |
-| Function-parameter extractors (axum-style `State<T>` args) | Requires macros or heavyweight trait machinery. `req.state::<T>()` covers the primary use case. |
-| Framework-level fix for `?` in anonymous closures | Rust inference limitation, not fixable without specialization. Documented guidance: use named `async fn` handlers returning `desirable::Result`. |
-| Fine-grained server options (header read timeout, keep-alive tuning) | No concrete demand yet; `http1::Builder` is currently left at defaults. |
-| Static-file `Cache-Control` config / strong content-hash ETags | Weak ETag (`mtime`+`size`) covers the common case; revisit when immutable-asset versioning is needed. |
-| `Session::destroy()` deletion-cookie helper | Natural follow-up to `SessionLayer`; small, planned when a use case lands. |
-| `X-Forwarded-For`-based rate limiting | Spoofable header; trusting it needs an explicit opt-in proxy configuration. RateLimit keys on the peer address. |
-| Unix domain sockets / multiple listeners | Niche deployment shapes; `run_with_shutdown` accepts any shutdown signal, and a `run_listener`-style API is the likely shape when needed. |
+Strategy: **2.x grows additively** — protocol capabilities and polish, each
+minor independently shippable, new dependencies only behind cargo features so
+default builds stay light. **3.0 is the convergence point** for breaking
+changes: MSRV/edition, deprecated removals, and the extractor decision.
+
+### v2.1 — Content negotiation & caching
+
+- **Compression middleware** (feature `compression`): gzip via
+  `async-compression` — the first feature-gated direct dependency. Applies to
+  `Body::Full` responses; skips already-compressed content types.
+- **Precompressed static assets**: serve `.gz`/`.br` siblings when the client
+  advertises support (`Content-Encoding` negotiation), zero runtime cost.
+- **Static-file `Cache-Control`** configuration, including an immutable mode
+  for hashed assets.
+- **`Session::destroy()`** integrated with `SessionLayer` (deletion cookie).
+
+### v2.2 — Static files & proxy environments
+
+- **Range requests** (206 Partial Content, single range) for `ServeFile` /
+  `ServeDir` — video seeking and resumable downloads.
+- **Trusted proxies**: explicit `trusted_proxies` configuration; extract the
+  real client IP from `X-Forwarded-For` into `Request::client_ip()`, shared
+  by RateLimit, RequestId and logging. Off by default (spoofable).
+- **Strong ETag option** (content hash, computed lazily and cached by
+  path+mtime) alongside the default weak validator.
+
+### v2.3 — WebSocket (feature `websocket`)
+
+- Hyper upgrade plumbing + `tokio-tungstenite` handshake.
+- `app.websocket("/ws", handler)`; the handler receives a lightweight
+  `WebSocketConn` wrapper. Pairs naturally with `Body::channel` for
+  WS↔SSE bridges.
+- First dependency outside the existing tree — isolated behind its own
+  feature so it stays opt-in.
+
+### v2.4 — Server capabilities
+
+- **Unix domain sockets** (`Server::bind_unix`) alongside TCP.
+- **Multiple listeners** served concurrently with one shared shutdown/drain.
+- **Fine-grained timeouts**: header read timeout, keep-alive tuning, per-
+  connection socket options.
+- **`run_listener`** — accept any listener (test-friendly, fd-passing
+  friendly).
+
+### v2.5 — TLS + HTTP/2 (features `tls`, `http2`)
+
+- **rustls** acceptor with a minimal certificate surface.
+- Switch to hyper-util's `auto` connection builder: **ALPN negotiates
+  HTTP/1.1 ↔ HTTP/2** with zero application changes (the 2.0 `Body` already
+  satisfies h2 requirements).
+- Note: WebSocket-over-h2 needs the extended-CONNECT flow — documented as
+  h1-only until then.
+
+### v3.0 — Breaking convergence
+
+- **MSRV** moves to the stable released ~2 years prior; edition re-evaluated.
+- Removal of everything deprecated during 2.x.
+- **Extractor decision point** — one of:
+  1. keep the named-`async fn`-returning-`Result` pattern as the permanent
+     API (current recommendation; zero macros),
+  2. a limited extractor trait (no macros) for `State<T>` / path tuples,
+  3. a `#[handler]` macro (breaks the no-macros principle — requires strong
+     justification).
+- Public-API audit: de-`pub` internal types (`Svc`, `dispatch`), plus any
+  accumulated small renames.
+- Request-side streaming evaluation, only if real demand exists.
+
+### Dependency policy for all of 2.x
+
+Default features stay dependency-light (current: 24 crates). Every new
+capability ships behind a cargo feature; each gated dependency must be a
+mature, widely-audited crate.
+
+## Deferred (still conscious trade-offs)
+
+| Item | Status |
+|------|--------|
+| Function-parameter extractors (axum-style) | v3.0 decision point, see above |
+| Framework-level fix for `?` in anonymous closures | Rust inference limitation; documented named-fn guidance stands |
+| Strong content-hash ETags by default | Optional in v2.2; weak validator remains default |
 
 ## Principles
 
 These constraints shaped every release and should shape future ones:
 
-1. **Zero new dependencies** for convenience features (two exceptions so far — `httpdate` and `tokio-util` — were already transitive).
+1. **Default builds stay dependency-light.** New capabilities ship behind cargo features; ungated additions must already be in the dependency tree.
 2. **No macros** for handlers; plain functions and closures.
 3. **Correct HTTP semantics first**: status codes, `Allow`, HEAD, conditional requests, and not leaking internals.
 4. **Behavior changes are documented** in the CHANGELOG, including internal-type changes.
