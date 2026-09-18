@@ -323,7 +323,7 @@ async fn strong_etag_for(
 
 async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOptions) -> Result {
   // A missing file is a client-visible 404, not a server error.
-  let (mut file, meta) = match open_for_serve(path).await {
+  let (mut file, meta, index_fallback) = match open_for_serve(path).await {
     Ok(opened) => opened,
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
       return Ok(Response::with_status_code(
@@ -369,10 +369,27 @@ async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOption
     etag
   };
 
-  let not_modified = is_not_modified(req, &etag, modified);
+  // Conditional-request methods: If-None-Match/If-Modified-Since produce
+  // 304 only for GET/HEAD; for other methods a matching If-None-Match is a
+  // 412 (RFC 9110 §13.1.2), and If-Modified-Since is ignored (§13.1.3).
+  let is_get_or_head = req.method() == hyper::Method::GET || req.method() == hyper::Method::HEAD;
+  let not_modified = is_get_or_head && is_not_modified(req, &etag, modified);
+  let precondition_failed = !is_get_or_head && is_not_modified(req, &etag, modified);
   if not_modified {
     let response = common_headers(
       hyper::Response::builder().status(hyper::StatusCode::NOT_MODIFIED),
+      etag.as_str(),
+      &last_modified,
+      options,
+      encoding,
+    )
+    .body(Body::empty())?;
+    return Ok(response.into());
+  }
+
+  if precondition_failed {
+    let response = common_headers(
+      hyper::Response::builder().status(hyper::StatusCode::PRECONDITION_FAILED),
       etag.as_str(),
       &last_modified,
       options,
@@ -386,9 +403,13 @@ async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOption
 
   // Single-range requests (206/416). Ranges apply to the representation
   // actually served (a precompressed sibling, when selected).
+  // Range handling is defined for GET only (RFC 9110 §14.2): other methods
+  // get the full representation.
+  let serve_range = req.method() == hyper::Method::GET;
   let mut partial: Option<(u64, u64)> = None; // (start, len)
   let mut unsatisfiable = false;
-  if let Some(spec) = req.header("range").and_then(|v| v.to_str().ok())
+  if serve_range
+    && let Some(spec) = req.header("range").and_then(|v| v.to_str().ok())
     && if_range_allows(req, &etag)
   {
     match parse_byte_range(spec, served_len) {
@@ -436,7 +457,11 @@ async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOption
     inner: Body::stream(stream),
     len,
   }));
-  let mime = mime_for_path(path);
+  let mime = if index_fallback {
+    mime_for_path(&path.join("index.html"))
+  } else {
+    mime_for_path(path)
+  };
   let mut builder = common_headers(
     hyper::Response::builder().status(status),
     etag.as_str(),
@@ -502,7 +527,9 @@ fn is_not_modified(req: &Request, etag: &str, modified: SystemTime) -> bool {
 ///
 /// A regular file costs a single `open` + `fstat`; the extra open happens
 /// only for directory hits.
-async fn open_for_serve(path: &Path) -> std::io::Result<(tokio::fs::File, std::fs::Metadata)> {
+async fn open_for_serve(
+  path: &Path,
+) -> std::io::Result<(tokio::fs::File, std::fs::Metadata, bool)> {
   // Reject symlinks at the final component: uploaded or planted links must
   // not serve files from outside the base directory. (lstat does not follow
   // the last component; the handle-based fstat below still gives the real
@@ -527,9 +554,9 @@ async fn open_for_serve(path: &Path) -> std::io::Result<(tokio::fs::File, std::f
     }
     let file = tokio::fs::File::open(&index).await?;
     let meta = file.metadata().await?;
-    Ok((file, meta))
+    Ok((file, meta, true))
   } else {
-    Ok((file, meta))
+    Ok((file, meta, false))
   }
 }
 
@@ -564,6 +591,7 @@ async fn open_for_serve(path: &Path) -> std::io::Result<(tokio::fs::File, std::f
 ///
 /// With this configuration, a request to `/assets/js/app.js` would serve
 /// the file `static/assets/js/app.js` with content type `text/javascript`.
+#[derive(Clone)]
 pub struct ServeDir {
   /// The directory to serve files from
   dir: PathBuf,
@@ -796,14 +824,14 @@ mod tests {
     std::fs::write(subdir.join("index.html"), "<h1>hi</h1>").unwrap();
 
     // A directory opens its index.html.
-    let (file, meta) = open_for_serve(&subdir).await.unwrap();
+    let (file, meta, _fallback) = open_for_serve(&subdir).await.unwrap();
     assert!(!meta.is_dir());
     drop(file);
 
     // A file opens directly.
     let file_path = base.join("app.js");
     std::fs::write(&file_path, b"console.log(1)").unwrap();
-    let (_, meta) = open_for_serve(&file_path).await.unwrap();
+    let (_, meta, _fallback) = open_for_serve(&file_path).await.unwrap();
     assert_eq!(meta.len(), 14);
 
     std::fs::remove_dir_all(&base).ok();

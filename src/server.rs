@@ -86,7 +86,13 @@ pub async fn dispatch(
       .extensions_mut()
       .insert(crate::request::ClientIp(client_ip));
   }
-  let response = router.dispatch(req.into(), remote_addr).await?;
+  // A propagated `Err` (middleware failure, invalid status code, ...) is
+  // rendered like any other error — returning it raw would close the
+  // connection with no response at all.
+  let response = match router.dispatch(req.into(), remote_addr).await {
+    Ok(resp) => resp,
+    Err(err) => crate::error::render_error(err),
+  };
   Ok(response.inner)
 }
 

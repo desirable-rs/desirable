@@ -1,4 +1,3 @@
-use crate::AnyResult;
 use crate::HyperRequest;
 use crate::Result;
 use crate::error::{invalid_param, missing_param};
@@ -134,13 +133,13 @@ impl Request {
   ///   Ok(format!("Created {}", user.name).into())
   /// }
   /// ```
-  pub async fn body<T>(&mut self) -> AnyResult<T>
+  pub async fn body<T>(&mut self) -> Result<T>
   where
     T: serde::de::DeserializeOwned + Send + Sync + 'static,
   {
     let inner = self.inner();
     let bytes = Self::collect_body_limited(inner).await?;
-    let payload: T = serde_json::from_reader(bytes.reader())?;
+    let payload: T = serde_json::from_reader(bytes.reader()).map_err(crate::error::Error::Json)?;
     Ok(payload)
   }
 
@@ -205,12 +204,13 @@ impl Request {
   ///   Ok("ok".into())
   /// }
   /// ```
-  pub fn query<T>(&self) -> AnyResult<Option<T>>
+  pub fn query<T>(&self) -> Result<Option<T>>
   where
     T: serde::de::DeserializeOwned,
   {
     if let Some(query) = self.uri().query() {
-      let result = serde_urlencoded::from_str::<T>(query)?;
+      let result =
+        serde_urlencoded::from_str::<T>(query).map_err(crate::error::Error::Urlencoded)?;
       Ok(Some(result))
     } else {
       Ok(None)
@@ -298,7 +298,7 @@ impl Request {
   ///   // Always has a value — no Option handling needed
   /// }
   /// ```
-  pub fn query_or_default<T>(&self) -> AnyResult<T>
+  pub fn query_or_default<T>(&self) -> Result<T>
   where
     T: serde::de::DeserializeOwned + Default,
   {
@@ -331,7 +331,7 @@ impl Request {
   ///   Ok("Logged in".into())
   /// }
   /// ```
-  pub async fn body_json<T>(&mut self) -> AnyResult<T>
+  pub async fn body_json<T>(&mut self) -> Result<T>
   where
     T: serde::de::DeserializeOwned + Send + Sync + 'static,
   {
@@ -367,13 +367,14 @@ impl Request {
   ///   Ok(format!("Hi {}", form.username).into())
   /// }
   /// ```
-  pub async fn form<T>(&mut self) -> AnyResult<T>
+  pub async fn form<T>(&mut self) -> Result<T>
   where
     T: serde::de::DeserializeOwned,
   {
     let inner = self.inner();
     let bytes = Self::collect_body_limited(inner).await?;
-    Ok(serde_urlencoded::from_bytes(&bytes)?)
+    let payload = serde_urlencoded::from_bytes(&bytes).map_err(crate::error::Error::Urlencoded)?;
+    Ok(payload)
   }
 
   /// Returns the first value of the given request header.

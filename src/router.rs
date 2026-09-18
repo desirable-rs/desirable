@@ -467,18 +467,16 @@ impl Router {
       req.extensions_mut().insert(Arc::clone(state));
     }
 
-    let mut response = Next {
+    let response = Next {
       endpoint,
       middlewares,
     }
     .run(req)
     .await;
 
-    // Per HTTP semantics, HEAD responses carry no body.
-    if is_head && let Ok(res) = &mut response {
-      *res.inner.body_mut() = crate::body::Body::empty();
-    }
-
+    // NOTE: hyper suppresses HEAD bodies itself while still emitting the
+    // headers (including Content-Length) the GET response would have — so
+    // no manual body stripping here (that would drop Content-Length).
     response
   }
 

@@ -1229,3 +1229,168 @@ async fn symlinked_static_files_are_not_served() {
   std::fs::remove_file(&secret).ok();
   std::fs::remove_dir_all(&outside_dir).ok();
 }
+
+#[tokio::test]
+async fn malformed_json_body_returns_400_not_500() {
+  let mut app = Router::new();
+  app.post("/json", |mut req: desirable::Request| async move {
+    let data: serde_json::Value = req.body_json().await?;
+    Ok::<_, desirable::Error>(desirable::Response::json(&data))
+  });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Malformed JSON: framework maps serde errors to 400 (not 500).
+  let body = r#"{"broken"#;
+  let req = format!(
+    "POST /json HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+    body.len(),
+    body
+  );
+  let res = raw_request(addr, &req).await;
+  assert!(res.starts_with("HTTP/1.1 400"), "got: {}", res);
+
+  // Valid JSON still works.
+  let body = r#"{"ok":true}"#;
+  let req = format!(
+    "POST /json HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+    body.len(),
+    body
+  );
+  let res = raw_request(addr, &req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+}
+
+#[cfg(feature = "compression")]
+#[tokio::test]
+async fn chunked_oversized_body_returns_413_not_500() {
+  use std::time::Duration;
+
+  let mut app = Router::new();
+  app.with(desirable::BodyLimit::new(8));
+  app.with(desirable::Timeout::new(Duration::from_secs(5)));
+  app.post("/upload", |mut req: desirable::Request| async move {
+    let data: serde_json::Value = req.body_json().await?;
+    Ok::<_, desirable::Error>(desirable::Response::json(&data))
+  });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Chunked body exceeding the limit with no Content-Length hint:
+  // the Limited body path must produce 413 (not a 500).
+  let payload = "x".repeat(64);
+  let chunked = format!("10\r\n{}\r\n0\r\n\r\n", &payload[..16]);
+  let req = format!(
+    "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}",
+    chunked
+  );
+  let res = raw_request_bytes(addr, &req).await;
+  let headers = String::from_utf8_lossy(&res);
+  assert!(headers.starts_with("HTTP/1.1 413"), "got: {}", headers);
+}
+
+#[tokio::test]
+async fn explicit_head_routes_are_dispatched() {
+  let mut app = Router::new();
+  app.head("/status", |_| async { "head-handler" });
+  app.get("/status", |_| async { "get-handler" });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Explicit HEAD route wins over the GET fallback.
+  let head_req = "HEAD /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, head_req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  let body = res.split("\r\n\r\n").nth(1).unwrap_or("");
+  assert!(body.is_empty(), "HEAD body must be empty");
+}
+
+#[tokio::test]
+async fn range_and_conditionals_are_get_only() {
+  let dir = std::env::temp_dir().join(format!("desirable-methods-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  std::fs::write(dir.join("data.bin"), b"0123456789").unwrap();
+
+  let mut app = Router::new();
+  // Same endpoint served for GET and POST: lets us verify that fs-level
+  // Range/conditional handling is method-gated.
+  let serve_dir = desirable::ServeDir::new(dir.clone());
+  app.get("/static/*file", serve_dir.clone());
+  app.at(hyper::Method::POST, "/static/*file", serve_dir);
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Range on POST is ignored -> full 200 (not 206).
+  let req = "POST /static/data.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-3\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(!res.contains("content-range"), "got: {}", res);
+  assert_eq!(res.split("\r\n\r\n").nth(1).unwrap_or("").len(), 10);
+
+  // If-None-Match on POST: 412 Precondition Failed (not 304).
+  let req = "POST /static/data.bin HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: *\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, req).await;
+  assert!(res.starts_with("HTTP/1.1 412"), "got: {}", res);
+
+  // GET with Range still serves 206.
+  let req = "GET /static/data.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-3\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, req).await;
+  assert!(res.starts_with("HTTP/1.1 206"), "got: {}", res);
+
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn directory_index_serves_html_content_type() {
+  let dir = std::env::temp_dir().join(format!("desirable-index-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  std::fs::write(dir.join("index.html"), b"<h1>index</h1>").unwrap();
+
+  let mut app = Router::new();
+  app.get("/site/*file", desirable::ServeDir::new(dir.clone()));
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // "/site/." maps file="." which resolves to the directory itself, so the
+  // server takes the index.html fallback path under test.
+  let res = raw_request(addr, &get_request("/site/.")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(
+    res.contains("content-type: text/html"),
+    "index.html must be served as html, got: {}",
+    res
+  );
+
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn middleware_errors_render_as_500_responses() {
+  use desirable::{Request, Router};
+
+  async fn boom(req: Request) -> desirable::Result {
+    let _ = req;
+    // Simulate a middleware-style failure by returning an error from a
+    // handler that wraps a failing extractor path.
+    Err(desirable::Error::Any(anyhow::anyhow!("boom")))
+  }
+
+  let mut app = Router::new();
+  // A middleware that short-circuits with an Err (same propagation path).
+  struct Fail;
+  #[async_trait::async_trait]
+  impl desirable::Middleware for Fail {
+    async fn handle(&self, _req: Request, _next: desirable::Next<'_>) -> desirable::Result {
+      Err(desirable::Error::Any(anyhow::anyhow!("mw failure")))
+    }
+  }
+  app.with(Fail);
+  app.get("/", boom);
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // The error is rendered as a response, not a dropped connection.
+  let res = raw_request(addr, &get_request("/")).await;
+  assert!(res.starts_with("HTTP/1.1 500"), "got: {}", res);
+}

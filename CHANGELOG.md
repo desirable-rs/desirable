@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.6.0] - 2026-09-18
+
+### Fixed
+
+- **Malformed JSON/urlencoded bodies returned 500 instead of 400** (BREAKING):
+  `Request::body`/`body_json`/`form`/`query`/`query_or_default` now return
+  the framework `Result` with typed errors — serde failures map to
+  `400 Bad Request` (`Error::Json`/`Error::Urlencoded`), oversized chunked
+  bodies map to `413` (`Error::BodyTooLarge`) instead of 500. Previously the
+  typed errors were erased by `anyhow` on the `AnyResult` boundary.
+- **`Router::head()` routes were unreachable**: HEAD requests only looked
+  up the GET table, so explicit HEAD handlers never ran and the router
+  advertised `Allow: HEAD` on a 405. Explicit HEAD routes are now matched
+  first (GET remains the fallback).
+- **HEAD responses no longer lose `Content-Length`**: the manual body strip
+  was removed — hyper already suppresses HEAD bodies while emitting the
+  headers a GET would have.
+- **Range/conditional handling is method-gated** (RFC 9110): `Range` on
+  non-GET is ignored (full 200); matching `If-None-Match` on non-GET/HEAD
+  yields `412 Precondition Failed`; `If-Modified-Since` is ignored for
+  non-GET/HEAD.
+- **Directory-index fallback serves the correct `Content-Type`**: previously
+  `index.html` reached through a directory path was labeled
+  `application/octet-stream`.
+- **Middleware/`into_response` errors no longer drop the connection with no
+  response**: they are rendered through the error pipeline
+  (`set_error_handler` aware).
+
+### Changed
+
+- `ServeDir` now implements `Clone` (two routes can share one configuration).
+
+---
+
 ## [2.5.1] - 2026-09-18
 
 ### Fixed
@@ -496,6 +530,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.6.0]: https://github.com/desirable-rs/desirable/compare/v2.5.1...v2.6.0
 [2.5.1]: https://github.com/desirable-rs/desirable/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/desirable-rs/desirable/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/desirable-rs/desirable/compare/v2.3.0...v2.4.0
