@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.7.1] - 2026-09-18
+
+### Changed
+
+- **Documentation-only.** Aligned docs with behavior: error status mapping
+  (400/413/500), header read timeout default (30s, hyper built-in),
+  rate-limit keying on the resolved client IP, and a session-layer doctest
+  that referenced a non-existent constructor. No code changes.
+
+---
+
 ## [2.6.0] - 2026-09-18
 
 ### Fixed
