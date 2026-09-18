@@ -130,6 +130,8 @@ pub struct Session {
   inner: SessionData,
   /// Whether the session has been modified
   modified: bool,
+  /// Whether the session was destroyed (cleared and scheduled for deletion)
+  destroyed: bool,
 }
 
 impl Session {
@@ -155,6 +157,7 @@ impl Session {
   /// ```
   pub fn new(data: SessionData) -> Self {
     Self {
+      destroyed: false,
       inner: data,
       modified: false,
     }
@@ -327,6 +330,25 @@ impl Session {
   /// ```
   pub fn is_modified(&self) -> bool {
     self.modified
+  }
+
+  /// Destroys the session: clears all data and schedules a deletion cookie
+  /// via the [`SessionLayer`](crate::SessionLayer) middleware.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// req.session().lock().unwrap().destroy(); // logout
+  /// ```
+  pub fn destroy(&mut self) {
+    self.inner.data.clear();
+    self.destroyed = true;
+    self.modified = true;
+  }
+
+  /// Returns `true` after [`Session::destroy`] was called.
+  pub fn is_destroyed(&self) -> bool {
+    self.destroyed
   }
 
   /// Retrieves a value from the session and deserializes it.

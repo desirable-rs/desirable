@@ -76,6 +76,7 @@ fn resolve_within(base: &Path, relative: &str) -> Option<PathBuf> {
 pub struct ServeFile {
   /// The path to the file to serve
   path: PathBuf,
+  options: ServeOptions,
 }
 
 impl ServeFile {
@@ -89,7 +90,32 @@ impl ServeFile {
   ///
   /// A new ServeFile instance
   pub fn new(path: PathBuf) -> Self {
-    ServeFile { path }
+    ServeFile {
+      path,
+      options: ServeOptions::default(),
+    }
+  }
+
+  /// Emits a `Cache-Control` header on responses.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// ServeFile::new(path).cache_control("public, max-age=3600")
+  /// ```
+  #[must_use]
+  pub fn cache_control(mut self, value: &str) -> Self {
+    self.options.cache_control = Some(value.to_string());
+    self
+  }
+
+  /// Serves precompressed `.gz`/`.br` siblings when the client accepts
+  /// them (brotli preferred). Responses gain `Content-Encoding` and
+  /// `Vary: Accept-Encoding`.
+  #[must_use]
+  pub fn precompressed(mut self, yes: bool) -> Self {
+    self.options.precompressed = yes;
+    self
   }
 }
 
@@ -107,8 +133,29 @@ impl Endpoint for ServeFile {
   /// `Last-Modified` headers, or `304 Not Modified` when conditional request
   /// headers allow it, or an error
   async fn call(&self, req: Request) -> Result {
-    serve_file_with_cache(&req, &self.path).await
+    serve_file_with_cache(&req, &self.path, &self.options).await
   }
+}
+
+/// Per-endpoint serving options (builder-configured).
+#[derive(Clone, Debug, Default)]
+struct ServeOptions {
+  /// Emits `Cache-Control` on 200/304 when set.
+  cache_control: Option<String>,
+  /// Serves `.br`/`.gz` siblings with `Content-Encoding` when the client
+  /// accepts them.
+  precompressed: bool,
+}
+
+/// Returns true when the request's `Accept-Encoding` mentions `token`.
+fn accepts_encoding(req: &Request, token: &str) -> bool {
+  req
+    .header("accept-encoding")
+    .and_then(|v| v.to_str().ok())
+    .is_some_and(|v| {
+      v.split(',')
+        .any(|part| part.trim().to_ascii_lowercase().starts_with(token))
+    })
 }
 
 /// Builds a response for the file at `path`, honoring HTTP conditional
@@ -119,9 +166,9 @@ impl Endpoint for ServeFile {
 /// `If-None-Match` matches the ETag (or `If-Modified-Since` is not earlier
 /// than the file's modification time and no `If-None-Match` is present),
 /// responds `304 Not Modified` with an empty body.
-async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
+async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOptions) -> Result {
   // A missing file is a client-visible 404, not a server error.
-  let (file, meta) = match open_for_serve(path).await {
+  let (mut file, meta) = match open_for_serve(path).await {
     Ok(opened) => opened,
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
       return Ok(Response::with_status_code(
@@ -139,31 +186,64 @@ async fn serve_file_with_cache(req: &Request, path: &Path) -> Result {
   let etag = format!("W/\"{:x}-{:x}\"", mtime_secs, meta.len());
   let last_modified = httpdate::fmt_http_date(modified);
 
+  // Precompressed siblings: prefer brotli, then gzip. The Content-Type and
+  // validators stay those of the plain file (same logical resource).
+  let mut encoding: Option<&'static str> = None;
+  if options.precompressed {
+    for (ext, token) in [(".br", "br"), (".gz", "gzip")] {
+      if !accepts_encoding(req, token) {
+        continue;
+      }
+      let mut sibling = path.as_os_str().to_os_string();
+      sibling.push(ext);
+      if let Ok(compressed) = tokio::fs::File::open(sibling).await {
+        file = compressed;
+        encoding = Some(token);
+        break;
+      }
+    }
+  }
+
   let not_modified = is_not_modified(req, &etag, modified);
   if not_modified {
-    let response = hyper::Response::builder()
+    let mut builder = hyper::Response::builder()
       .status(hyper::StatusCode::NOT_MODIFIED)
       .header(header::ETAG, etag.as_str())
-      .header(header::LAST_MODIFIED, last_modified)
-      .body(Body::empty())?;
+      .header(header::LAST_MODIFIED, last_modified);
+    if let Some(cache_control) = &options.cache_control {
+      builder = builder.header(header::CACHE_CONTROL, cache_control.clone());
+    }
+    if let Some(enc) = encoding {
+      builder = builder.header(header::CONTENT_ENCODING, enc);
+    }
+    if options.precompressed {
+      builder = builder.header(header::VARY, "Accept-Encoding");
+    }
+    let response = builder.body(Body::empty())?;
     return Ok(response.into());
   }
 
-  // Stream the file: memory use is one chunk, not the whole file. The
-  // exact length from fstat is preserved as the size hint so hyper sends
-  // Content-Length instead of chunked encoding.
-  let len = meta.len();
+  let len = file.metadata().await?.len();
   let stream = tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024);
   let body = Body::Streaming(BoxBody::new(SizedBody {
     inner: Body::stream(stream),
     len,
   }));
   let mime = mime_for_path(path);
-  let response = hyper::Response::builder()
+  let mut builder = hyper::Response::builder()
     .header(header::CONTENT_TYPE, mime)
     .header(header::ETAG, etag.as_str())
-    .header(header::LAST_MODIFIED, last_modified)
-    .body(body)?;
+    .header(header::LAST_MODIFIED, last_modified);
+  if let Some(cache_control) = &options.cache_control {
+    builder = builder.header(header::CACHE_CONTROL, cache_control.clone());
+  }
+  if let Some(enc) = encoding {
+    builder = builder.header(header::CONTENT_ENCODING, enc);
+  }
+  if options.precompressed {
+    builder = builder.header(header::VARY, "Accept-Encoding");
+  }
+  let response = builder.body(body)?;
   Ok(response.into())
 }
 
@@ -263,6 +343,7 @@ async fn open_for_serve(path: &Path) -> std::io::Result<(tokio::fs::File, std::f
 pub struct ServeDir {
   /// The directory to serve files from
   dir: PathBuf,
+  options: ServeOptions,
 }
 
 impl ServeDir {
@@ -276,7 +357,32 @@ impl ServeDir {
   ///
   /// A new ServeDir instance
   pub fn new(dir: PathBuf) -> Self {
-    ServeDir { dir }
+    ServeDir {
+      dir,
+      options: ServeOptions::default(),
+    }
+  }
+
+  /// Emits a `Cache-Control` header on responses.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// ServeDir::new(dir).cache_control("public, max-age=31536000, immutable")
+  /// ```
+  #[must_use]
+  pub fn cache_control(mut self, value: &str) -> Self {
+    self.options.cache_control = Some(value.to_string());
+    self
+  }
+
+  /// Serves precompressed `.gz`/`.br` siblings when the client accepts
+  /// them (brotli preferred). Responses gain `Content-Encoding` and
+  /// `Vary: Accept-Encoding`.
+  #[must_use]
+  pub fn precompressed(mut self, yes: bool) -> Self {
+    self.options.precompressed = yes;
+    self
   }
 }
 
@@ -310,7 +416,7 @@ impl Endpoint for ServeDir {
         ));
       }
     };
-    serve_file_with_cache(&req, &resolved).await
+    serve_file_with_cache(&req, &resolved, &self.options).await
   }
 }
 

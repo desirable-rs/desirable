@@ -101,10 +101,16 @@ impl Middleware for SessionLayer {
 
     let mut response = next.run(req).await;
 
-    // Persist the session only when handlers actually changed it.
+    // Persist the session only when handlers actually changed it; a
+    // destroyed session gets a deletion cookie instead.
     if let Ok(res) = &mut response {
       let session = persist.lock().expect("session mutex poisoned");
-      if session.is_modified() {
+      if session.is_destroyed() {
+        res.append_header(
+          hyper::header::SET_COOKIE,
+          self.manager.make_deletion_cookie(),
+        );
+      } else if session.is_modified() {
         res.append_header(
           hyper::header::SET_COOKIE,
           self.manager.make_cookie_header(&session),

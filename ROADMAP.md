@@ -22,6 +22,7 @@ arrives.
 | 1.9.0 | Performance + architecture | Zero-alloc dispatch, cookie-padding truncation fix (security), single-open static files, `session.rs` split into a directory module, content-type constant unification |
 | 1.10.0 | Middleware hot paths | Cors precomputed header values, borrowing session-cookie lookup, no redundant stat for static files, wrapper-free routes without middleware, allocation-free RequestId generation |
 | 2.0.0 | Streaming bodies | Concrete `Body` enum (`Full` / `Streaming`), `Body::stream` + `Body::channel` (SSE-capable), static files stream by default with exact `Content-Length`; `utils` removed |
+| 2.1.0 | Content negotiation & caching | `Compression` middleware (feature-gated gzip), precompressed `.gz`/`.br` static assets, `Cache-Control` config, `Session::destroy()` with deletion-cookie integration, CI `--all-features` coverage |
 
 ## Roadmap: 2.x → 3.0
 
@@ -30,7 +31,7 @@ minor independently shippable, new dependencies only behind cargo features so
 default builds stay light. **3.0 is the convergence point** for breaking
 changes: MSRV/edition, deprecated removals, and the extractor decision.
 
-### v2.1 — Content negotiation & caching
+### v2.1 — Content negotiation & caching ✅ shipped
 
 - **Compression middleware** (feature `compression`): gzip via
   `async-compression` — the first feature-gated direct dependency. Applies to

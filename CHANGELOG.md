@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.1.0] - 2026-09-18
+
+### Added
+
+- **Compression middleware** (feature `compression`): `Compression::new()`
+  gzips eligible buffered responses (`Accept-Encoding: gzip`, 2xx status,
+  compressible content type, >= 256 bytes) and recomputes `Content-Length`.
+  Streaming bodies pass through. New optional dependency: `async-compression`
+  (`gzip` + `tokio` features).
+- **Precompressed static assets**: `ServeDir::precompressed(true)` /
+  `ServeFile::precompressed(true)` serve `.gz`/`.br` siblings (brotli
+  preferred) with `Content-Encoding` and `Vary: Accept-Encoding`, keeping the
+  plain file's `Content-Type` and validators.
+- **`Cache-Control` for static files**: `ServeDir::cache_control(...)` /
+  `ServeFile::cache_control(...)`, emitted on 200 and 304 responses.
+- **`Session::destroy()`** clears the session and makes `SessionLayer` emit a
+  `Max-Age=0` deletion cookie (logout). Stateless signed cookies remain
+  non-revocable by design; server-side revocation needs a store (future).
+
+### Changed
+
+- CI now also builds and tests with `--all-features`, so feature-gated code
+  is covered.
+
+---
+
 ## [2.0.0] - 2026-09-18
 
 ### Breaking
@@ -346,6 +372,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.1.0]: https://github.com/desirable-rs/desirable/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/desirable-rs/desirable/compare/v1.10.0...v2.0.0
 [1.10.0]: https://github.com/desirable-rs/desirable/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/desirable-rs/desirable/compare/v1.8.0...v1.9.0

@@ -49,6 +49,18 @@ async fn spawn_server(router: Router) -> (std::net::SocketAddr, tokio::task::Joi
   panic!("server did not start listening within 1s");
 }
 
+/// Sends a raw HTTP request and returns the full response as bytes.
+#[cfg_attr(not(feature = "compression"), allow(dead_code))]
+async fn raw_request_bytes(addr: std::net::SocketAddr, request: &str) -> Vec<u8> {
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+  let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+  stream.write_all(request.as_bytes()).await.unwrap();
+  let mut buf = Vec::new();
+  stream.read_to_end(&mut buf).await.unwrap();
+  buf
+}
+
 /// Sends a raw HTTP request and returns the full response text.
 async fn raw_request(addr: std::net::SocketAddr, request: &str) -> String {
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -516,4 +528,188 @@ async fn static_file_streams_with_exact_content_length() {
   assert!(body.bytes().all(|b| b == b'x'));
 
   std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(feature = "compression")]
+#[tokio::test]
+async fn compression_gzips_eligible_responses() {
+  let mut app = Router::new();
+  app.with(desirable::Compression::new());
+  // > 256 bytes so the size threshold passes.
+  let text = "a".repeat(1024);
+  app.get("/text", move |_| {
+    let text = text.clone();
+    async move { desirable::Response::builder().text(text) }
+  });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Client accepts gzip: headers say gzip and the body is real gzip data
+  // (binary — parse headers separately from the payload).
+  let req =
+    "GET /text HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n";
+  let raw = raw_request_bytes(addr, req).await;
+  let split = raw
+    .windows(4)
+    .position(|w| w == b"\r\n\r\n")
+    .expect("response must contain a header/body separator");
+  let (headers, body) = raw.split_at(split + 4);
+  let headers = String::from_utf8(headers.to_vec()).unwrap();
+  assert!(headers.starts_with("HTTP/1.1 200"), "got: {}", headers);
+  assert!(
+    headers
+      .to_ascii_lowercase()
+      .contains("content-encoding: gzip"),
+    "got: {}",
+    headers
+  );
+
+  // Decompress and verify the payload round-trips.
+  let mut decoder = async_compression::tokio::write::GzipDecoder::new(Vec::new());
+  use tokio::io::AsyncWriteExt as _;
+  decoder.write_all(body).await.unwrap();
+  decoder.shutdown().await.unwrap();
+  assert_eq!(decoder.into_inner(), "a".repeat(1024).as_bytes());
+
+  // Client without gzip support: plain body.
+  let res = raw_request(addr, &get_request("/text")).await;
+  assert!(
+    !res.to_ascii_lowercase().contains("content-encoding"),
+    "got: {}",
+    res
+  );
+  assert!(res.ends_with(&"a".repeat(1024)), "got: {}", res);
+}
+
+#[tokio::test]
+async fn precompressed_static_assets_are_negotiated() {
+  let dir = std::env::temp_dir().join(format!("desirable-precomp-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  std::fs::write(dir.join("app.js"), b"console.log('plain');").unwrap();
+  std::fs::write(dir.join("app.js.gz"), b"gzip-bytes").unwrap();
+
+  let mut app = Router::new();
+  app.get(
+    "/static/*file",
+    desirable::ServeDir::new(dir.clone())
+      .precompressed(true)
+      .cache_control("public, max-age=3600"),
+  );
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Accepts gzip: served the .gz sibling verbatim, labeled + cached.
+  let req = "GET /static/app.js HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(
+    res.to_ascii_lowercase().contains("content-encoding: gzip"),
+    "got: {}",
+    res
+  );
+  assert!(
+    res.to_ascii_lowercase().contains("vary: accept-encoding"),
+    "got: {}",
+    res
+  );
+  assert!(
+    res.contains("cache-control: public, max-age=3600"),
+    "got: {}",
+    res
+  );
+  assert!(
+    res.contains("content-type: text/javascript"),
+    "got: {}",
+    res
+  );
+  assert!(res.ends_with("gzip-bytes"), "got: {}", res);
+
+  // No Accept-Encoding: plain file, no Content-Encoding.
+  let res = raw_request(addr, &get_request("/static/app.js")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(
+    !res.to_ascii_lowercase().contains("content-encoding"),
+    "got: {}",
+    res
+  );
+  assert!(res.ends_with("console.log('plain');"), "got: {}", res);
+
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn session_destroy_sends_deletion_cookie() {
+  use desirable::{Request, Result, SessionConfig, SessionLayer, SessionManager};
+
+  async fn login(mut req: Request) -> Result {
+    let user: String = req.body_json().await?;
+    req.session().lock().unwrap().insert("user", user)?;
+    Ok::<_, desirable::Error>("ok".into())
+  }
+
+  async fn logout(req: Request) -> Result {
+    req.session().lock().unwrap().destroy();
+    Ok::<_, desirable::Error>("bye".into())
+  }
+
+  async fn whoami(req: Request) -> &'static str {
+    let name: Option<String> = req.session().lock().unwrap().get("user").unwrap();
+    if name.is_some() { "known" } else { "anonymous" }
+  }
+
+  let manager = SessionManager::new(SessionConfig::new(b"destroy-test-key-32-bytes!!!1234"));
+  let mut app = Router::new();
+  app.with(SessionLayer::new(manager));
+  app.post("/login", |req: Request| login(req));
+  app.post("/logout", |req: Request| logout(req));
+  app.get("/me", whoami);
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Login, keep the session cookie.
+  let body = "\"alice\"";
+  let req = format!(
+    "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+    body.len(),
+    body
+  );
+  let res = raw_request(addr, &req).await;
+  let cookie_pair = res
+    .lines()
+    .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
+    .and_then(|l| l.split(':').nth(1))
+    .and_then(|v| v.split(';').next())
+    .unwrap_or_default()
+    .trim()
+    .to_string();
+
+  // Session is live.
+  let req = format!(
+    "GET /me HTTP/1.1\r\nHost: localhost\r\nCookie: {}\r\nConnection: close\r\n\r\n",
+    cookie_pair
+  );
+  let res = raw_request(addr, &req).await;
+  assert!(res.ends_with("known"), "got: {}", res);
+
+  // Destroy: response carries a Max-Age=0 deletion cookie.
+  let req = format!(
+    "POST /logout HTTP/1.1\r\nHost: localhost\r\nCookie: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    cookie_pair
+  );
+  let res = raw_request(addr, &req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  let set_cookie = res
+    .lines()
+    .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
+    .expect("destroy must emit a deletion cookie")
+    .to_ascii_lowercase();
+  assert!(set_cookie.contains("max-age=0"), "got: {}", set_cookie);
+
+  // A compliant browser drops the cookie; the deletion cookie value
+  // (empty) starts a fresh anonymous session.
+  let req = "GET /me HTTP/1.1\r\nHost: localhost\r\nCookie: desirable_session=\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, req).await;
+  assert!(res.ends_with("anonymous"), "got: {}", res);
+  // NOTE: stateless signed cookies cannot be revoked server-side — replaying
+  // the old value still verifies. Server-side revocation needs a store.
 }

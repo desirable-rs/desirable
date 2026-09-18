@@ -66,7 +66,8 @@ app.post("/users", handler);           // GET /users/   → 200 (trailing slash 
                                        // DELETE /users → 405 + Allow: GET
 ```
 
-**Built-in middleware** — one line each, zero extra dependencies:
+**Built-in middleware** — one line each (gzip compression behind the
+optional `compression` feature; everything else dependency-free):
 
 ```rust,ignore
 app.with(desirable::Logger);                    // GET /users → 200 3ms (tracing)
@@ -75,6 +76,8 @@ app.with(desirable::Timeout::new(Duration::from_secs(30)));   // → 408
 app.with(desirable::BodyLimit::new(1024 * 1024));             // → 413
 app.with(desirable::RateLimit::per_second(100));              // → 429 + Retry-After
 app.with(desirable::RequestId);                  // X-Request-Id on every response
+// feature = "compression":
+app.with(desirable::Compression::new());          // gzip eligible responses
 ```
 
 **Typed state** — share DB pools and config without generics:
@@ -85,10 +88,18 @@ let app = Router::new().with_state(DbPool::new());
 let db = req.state::<DbPool>()?;
 ```
 
-**Static files** — `ServeFile` / `ServeDir` with extension-based `Content-Type`, directory `index.html` fallback, path-traversal protection, and conditional-request support (`ETag`, `Last-Modified`, `304 Not Modified`).
+**Static files** — `ServeFile` / `ServeDir` with extension-based `Content-Type`, directory `index.html` fallback, path-traversal protection, conditional requests (`ETag`, `Last-Modified`, `304`), streaming responses with exact `Content-Length`, precompressed `.gz`/`.br` sibling serving, and `Cache-Control` configuration:
+
+```rust,ignore
+app.get("/static/*file",
+    desirable::ServeDir::new(dir)
+        .precompressed(true)
+        .cache_control("public, max-age=31536000, immutable"));
+```
 
 **Sessions** — one line to enable; handlers mutate `req.session()` and the
-`Set-Cookie` header is emitted automatically, only when the session changed.
+`Set-Cookie` header is emitted automatically, only when the session changed
+(`session.destroy()` emits a deletion cookie for logout).
 Cookies are HMAC-SHA256 signed (tamper-proof), configurable via
 `SessionConfig::new(key).secure(true).max_age_secs(86400)`:
 
