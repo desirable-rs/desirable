@@ -144,10 +144,7 @@ impl Middleware for Cors {
 
     let mut response = if is_preflight {
       // Preflight: return 204 No Content, don't call next
-      Ok(Response::with_status_code(
-        hyper::StatusCode::NO_CONTENT,
-        String::new(),
-      ))
+      Ok(Response::static_text(hyper::StatusCode::NO_CONTENT, ""))
     } else {
       // Normal request: run the handler
       next.run(req).await

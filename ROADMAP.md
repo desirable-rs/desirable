@@ -27,6 +27,11 @@ arrives.
 | 2.3.0 | WebSocket | `Router::websocket` + `WebSocketConn`/`WebSocketUpgrade` behind the `websocket` feature (tokio-tungstenite); hyper `Upgraded` bridged to tokio IO for tungstenite |
 | 2.4.0 | Server capabilities | Unix domain socket servers (`bind_unix`), `run_tcp_listener` for pre-bound listeners, multi-listener deployments with shared shutdown, `http1_header_read_timeout` slow-loris protection |
 | 2.5.0 | TLS + HTTP/2 | `tls` feature: rustls acceptor with ALPN h2/h1 negotiation (e2e-verified h2 over TLS), PEM config helper; `tls` dependency subtree isolated behind the feature |
+| 2.5.1 | Security patch | Session expiry enforced server-side (cookies replayable past `max_age`); rate-limit map eviction hardened against flush attacks |
+| 2.6.0 | HTTP semantics | Malformed JSON/urlencoded bodies map to 400 (typed errors preserved through the `Result` boundary), chunked 413, `Router::head()` routes reachable, method-gated Range/304 (412 for other methods), dir-index MIME |
+| 2.7.0 | Operational hardening | Fatal accept errors no longer orphan in-flight connections (drain runs either way, transient errors retried), bounded shutdown-aware TLS handshakes, WS sessions tracked by graceful shutdown, declared MSRV 1.88, CI/Jenkins test coverage fixed |
+| 2.7.1 | Docs only | Documentation aligned with behavior (error status mapping, header read timeout default, rate-limit keying, session doctest) |
+| 2.8.0 | Hot-path allocations & syscalls | Zero-alloc cookie lookup (parse only the match), fewer static-file syscalls (redundant `metadata`/`fstat` removed, `ServeDir` base resolved once), builder-time `HeaderValue` parsing (`Cache-Control`), precomputed deletion cookie, allocation-free 429, zero-copy fixed-text responses, single-pass `Cow`/`Bytes` responses |
 
 ## Roadmap: 2.x → 3.0
 

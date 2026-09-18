@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.8.0] - 2026-09-19
+
+### Performance
+
+- **`Request::cookie()` scans names without allocating and parses only the
+  matching cookie.** Previously every cookie in the `Cookie` header was
+  parsed (two allocations each) just to find one; the scan now compares
+  names zero-copy, so cost no longer grows with the number of cookies the
+  client sends.
+- **Static-file serving makes fewer syscalls per request**: the redundant
+  `metadata()` probe before precompressed-sibling negotiation was removed
+  (the directory-index flag from the open already answers it), and the
+  `fstat` for the served length is skipped when no precompressed sibling
+  was selected (the open-time metadata is reused).
+- **`ServeDir` resolves its base directory once** (at construction, or on
+  the first request if the directory did not exist yet) instead of running
+  `canonicalize` on the base for every request. The per-request
+  canonicalize of the *resolved* path — the actual symlink-escape check —
+  is unchanged.
+- **`Cache-Control` values are parsed into `HeaderValue` at builder time**
+  for `ServeFile`/`ServeDir` instead of re-parsed on every response.
+- **`SessionManager::make_deletion_cookie()` precomputes the constant
+  cookie** on first use instead of rebuilding the cookie string on every
+  destroyed session.
+- **Rate-limit 429 responses are allocation-free**: static body and a
+  `from_static` `Retry-After` — the throttled path is the one that gets
+  hammered under load.
+- **`mime_for_path` avoids the lowercase copy** for already-lowercase
+  extensions (the common case).
+- **Strong-ETag hashing builds its hex digest without per-byte
+  `format!` allocations.**
+- **Fixed-text responses skip body allocation**: a `static_text`
+  constructor (zero-copy `&'static str` body) now backs the default 500,
+  404/403 static-file replies, rate-limit 429, timeout 408, and CORS
+  preflight 204.
+- **`IntoResponse` for `Cow<'static, str>` and `Bytes` build the response
+  in a single builder pass** (content type set up front) instead of
+  building and then patching headers; `Body` gained the corresponding
+  `From<Cow<'static, str>>` impl.
+
+### Changed
+
+- Invalid `Cors` and `Cache-Control` configuration values now fail fast at
+  construction (`panic` with the offending value) instead of failing at
+  request time.
+
+---
+
 ## [2.7.0] - 2026-09-18
 
 ### Fixed

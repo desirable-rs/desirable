@@ -110,6 +110,17 @@ impl Response {
       .into()
   }
 
+  /// Creates a response with a fixed `&'static str` body — no allocation
+  /// for the status, the static content-type, or the body.
+  pub(crate) fn static_text(status: StatusCode, body: &'static str) -> Self {
+    hyper::http::Response::builder()
+      .header(header::CONTENT_TYPE, &CONTENT_TYPE_TEXT)
+      .status(status)
+      .body(Body::full(body))
+      .expect("static status and content-type cannot fail to build")
+      .into()
+  }
+
   /// Creates a JSON response with the given serializable payload.
   ///
   /// # Type Parameters

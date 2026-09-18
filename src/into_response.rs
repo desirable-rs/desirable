@@ -94,12 +94,7 @@ impl IntoResponse for String {
 
 impl IntoResponse for Cow<'static, str> {
   fn into_response(self) -> Result {
-    let mut res = Full::from(self).into_response()?;
-    res
-      .inner
-      .headers_mut()
-      .insert(header::CONTENT_TYPE, CONTENT_TYPE_TEXT.clone());
-    Ok(res)
+    build_response(hyper::StatusCode::OK, Some(&CONTENT_TYPE_TEXT), self)
   }
 }
 
@@ -130,38 +125,33 @@ impl IntoResponse for () {
 
 impl IntoResponse for (hyper::StatusCode, String) {
   fn into_response(self) -> Result {
-    build_response(self.0, Some(&CONTENT_TYPE_TEXT), Bytes::from(self.1))
+    build_response(self.0, Some(&CONTENT_TYPE_TEXT), self.1)
   }
 }
 
 impl IntoResponse for (hyper::StatusCode, &'static str) {
   fn into_response(self) -> Result {
-    build_response(self.0, Some(&CONTENT_TYPE_TEXT), Bytes::from(self.1))
+    build_response(self.0, Some(&CONTENT_TYPE_TEXT), self.1)
   }
 }
 
 impl IntoResponse for (u16, String) {
   fn into_response(self) -> Result {
     let status = hyper::StatusCode::from_u16(self.0)?;
-    build_response(status, Some(&CONTENT_TYPE_TEXT), Bytes::from(self.1))
+    build_response(status, Some(&CONTENT_TYPE_TEXT), self.1)
   }
 }
 
 impl IntoResponse for (u16, &'static str) {
   fn into_response(self) -> Result {
     let status = hyper::StatusCode::from_u16(self.0)?;
-    build_response(status, Some(&CONTENT_TYPE_TEXT), Bytes::from(self.1))
+    build_response(status, Some(&CONTENT_TYPE_TEXT), self.1)
   }
 }
 
 impl IntoResponse for Bytes {
   fn into_response(self) -> Result {
-    let mut res = Full::from(self).into_response()?;
-    res
-      .inner
-      .headers_mut()
-      .insert(header::CONTENT_TYPE, CONTENT_TYPE_OCTET.clone());
-    Ok(res)
+    build_response(hyper::StatusCode::OK, Some(&CONTENT_TYPE_OCTET), self)
   }
 }
 

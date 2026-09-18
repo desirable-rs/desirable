@@ -3,6 +3,7 @@ use crate::{Endpoint, Request, Response, Result};
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use hyper::header;
+use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -12,12 +13,19 @@ use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 /// Returns the MIME type for a file based on its extension.
 ///
 /// Covers common web file types; falls back to `application/octet-stream`.
+/// Already-lowercase extensions (the common case) are matched without
+/// allocating; only mixed-case extensions pay for a lowercase copy.
 fn mime_for_path(path: &Path) -> &'static str {
   let ext = path
     .extension()
     .and_then(|e| e.to_str())
     .unwrap_or_default();
-  match ext.to_ascii_lowercase().as_str() {
+  let ext: Cow<'_, str> = if ext.bytes().any(|b| b.is_ascii_uppercase()) {
+    Cow::Owned(ext.to_ascii_lowercase())
+  } else {
+    Cow::Borrowed(ext)
+  };
+  match ext.as_ref() {
     "html" | "htm" => "text/html; charset=utf-8",
     "css" => "text/css; charset=utf-8",
     "js" | "mjs" => "text/javascript; charset=utf-8",
@@ -106,7 +114,7 @@ impl ServeFile {
   /// ```
   #[must_use]
   pub fn cache_control(mut self, value: &str) -> Self {
-    self.options.cache_control = Some(value.to_string());
+    self.options.cache_control = Some(parse_cache_control(value));
     self
   }
 
@@ -129,6 +137,13 @@ impl ServeFile {
   }
 }
 
+/// Parses a configured `Cache-Control` value once, at construction time.
+fn parse_cache_control(value: &str) -> header::HeaderValue {
+  value
+    .parse()
+    .unwrap_or_else(|_| panic!("invalid Cache-Control value: {value:?}"))
+}
+
 #[async_trait::async_trait]
 impl Endpoint for ServeFile {
   /// Serves the file content.
@@ -147,11 +162,12 @@ impl Endpoint for ServeFile {
   }
 }
 
-/// Per-endpoint serving options (builder-configured).
+/// Per-endpoint serving options (builder-configured). Parsed eagerly so the
+/// request path never validates or re-parses configuration values.
 #[derive(Clone, Debug, Default)]
 struct ServeOptions {
   /// Emits `Cache-Control` on 200/304 when set.
-  cache_control: Option<String>,
+  cache_control: Option<header::HeaderValue>,
   /// Serves `.br`/`.gz` siblings with `Content-Encoding` when the client
   /// accepts them.
   precompressed: bool,
@@ -308,7 +324,11 @@ async fn strong_etag_for(
   file.seek(std::io::SeekFrom::Start(0)).await?;
 
   let digest = Sha256::digest(&buf);
-  let hex: String = digest[..16].iter().map(|b| format!("{:02x}", b)).collect();
+  let mut hex = String::with_capacity(32);
+  for byte in &digest[..16] {
+    use std::fmt::Write as _;
+    let _ = write!(hex, "{byte:02x}");
+  }
   let tag = format!("\"{}-{}\"", hex, size);
 
   {
@@ -326,9 +346,9 @@ async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOption
   let (mut file, meta, index_fallback) = match open_for_serve(path).await {
     Ok(opened) => opened,
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-      return Ok(Response::with_status_code(
+      return Ok(Response::static_text(
         hyper::StatusCode::NOT_FOUND,
-        "not found".to_string(),
+        "not found",
       ));
     }
     Err(err) => return Err(err.into()),
@@ -342,13 +362,10 @@ async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOption
   let last_modified = httpdate::fmt_http_date(modified);
 
   // Precompressed siblings: prefer brotli, then gzip. The Content-Type and
-  // validators stay those of the plain file (same logical resource).
+  // validators stay those of the plain file (same logical resource). A
+  // directory hit (already swapped to its index.html) has no siblings.
   let mut encoding: Option<&'static str> = None;
-  let path_is_dir = tokio::fs::metadata(path)
-    .await
-    .map(|m| m.is_dir())
-    .unwrap_or(false);
-  if options.precompressed && !path_is_dir {
+  if options.precompressed && !index_fallback {
     for (ext, token) in [(".br", "br"), (".gz", "gzip")] {
       if !accepts_encoding(req, token) {
         continue;
@@ -399,7 +416,13 @@ async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOption
     return Ok(response.into());
   }
 
-  let served_len = file.metadata().await?.len();
+  // Length of the representation actually served: the fstat from
+  // `open_for_serve` covers the plain file; a precompressed sibling (a
+  // different inode) needs one fresh fstat.
+  let served_len = match encoding {
+    Some(_) => file.metadata().await?.len(),
+    None => meta.len(),
+  };
 
   // Single-range requests (206/416). Ranges apply to the representation
   // actually served (a precompressed sibling, when selected).
@@ -595,11 +618,18 @@ async fn open_for_serve(
 pub struct ServeDir {
   /// The directory to serve files from
   dir: PathBuf,
+  /// Symlink-resolved `dir`, computed once (at construction, or on the
+  /// first request when the directory did not exist yet); requests are
+  /// required to canonicalize into this base.
+  canonical_base: std::sync::OnceLock<PathBuf>,
   options: ServeOptions,
 }
 
 impl ServeDir {
   /// Creates a new ServeDir endpoint.
+  ///
+  /// The base directory is resolved (symlinks followed) once here; if it
+  /// does not exist yet, resolution is retried on the first request.
   ///
   /// # Arguments
   ///
@@ -609,8 +639,13 @@ impl ServeDir {
   ///
   /// A new ServeDir instance
   pub fn new(dir: PathBuf) -> Self {
+    let canonical_base = std::sync::OnceLock::new();
+    if let Ok(resolved) = dir.canonicalize() {
+      let _ = canonical_base.set(resolved);
+    }
     ServeDir {
       dir,
+      canonical_base,
       options: ServeOptions::default(),
     }
   }
@@ -624,7 +659,7 @@ impl ServeDir {
   /// ```
   #[must_use]
   pub fn cache_control(mut self, value: &str) -> Self {
-    self.options.cache_control = Some(value.to_string());
+    self.options.cache_control = Some(parse_cache_control(value));
     self
   }
 
@@ -671,9 +706,9 @@ impl Endpoint for ServeDir {
     let resolved = match resolve_within(&self.dir, &file) {
       Some(path) => path,
       None => {
-        return Ok(Response::with_status_code(
+        return Ok(Response::static_text(
           hyper::StatusCode::FORBIDDEN,
-          "Forbidden".to_string(),
+          "Forbidden",
         ));
       }
     };
@@ -681,13 +716,16 @@ impl Endpoint for ServeDir {
     // Symlink hardening: fully resolve the path (following any directory or
     // file symlinks) and require it to stay inside the canonical base
     // directory. Catches planted directory symlinks that the final-
-    // component lstat check cannot see.
+    // component lstat check cannot see. The base is resolved once (cached),
+    // so the steady-state cost is a single canonicalize per request.
     if let Ok(actual) = resolved.canonicalize() {
-      let base = self.dir.canonicalize().unwrap_or_else(|_| self.dir.clone());
-      if !actual.starts_with(&base) {
-        return Ok(Response::with_status_code(
+      let base = self
+        .canonical_base
+        .get_or_init(|| self.dir.canonicalize().unwrap_or_else(|_| self.dir.clone()));
+      if !actual.starts_with(base) {
+        return Ok(Response::static_text(
           hyper::StatusCode::NOT_FOUND,
-          "not found".to_string(),
+          "not found",
         ));
       }
     }

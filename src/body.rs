@@ -220,6 +220,15 @@ impl From<String> for Body {
   }
 }
 
+impl From<std::borrow::Cow<'static, str>> for Body {
+  fn from(data: std::borrow::Cow<'static, str>) -> Self {
+    match data {
+      std::borrow::Cow::Borrowed(s) => Body::full(s),
+      std::borrow::Cow::Owned(s) => Body::full(s),
+    }
+  }
+}
+
 impl From<Vec<u8>> for Body {
   fn from(data: Vec<u8>) -> Self {
     Body::full(data)

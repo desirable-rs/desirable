@@ -67,6 +67,9 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct SessionManager {
   /// The session configuration
   config: Arc<SessionConfig>,
+  /// The deletion cookie, precomputed on first use — it is constant for a
+  /// given configuration.
+  deletion_cookie: std::sync::OnceLock<http::HeaderValue>,
 }
 
 impl SessionManager {
@@ -94,6 +97,7 @@ impl SessionManager {
   pub fn new(config: SessionConfig) -> Self {
     Self {
       config: Arc::new(config),
+      deletion_cookie: std::sync::OnceLock::new(),
     }
   }
 
@@ -363,18 +367,27 @@ impl SessionManager {
   /// // response.headers_mut().insert(hyper::header::SET_COOKIE, deletion_cookie);
   /// ```
   pub fn make_deletion_cookie(&self) -> http::HeaderValue {
-    let mut builder = cookie::CookieBuilder::new(self.config.cookie_name.clone(), "")
-      .path(self.config.path.clone())
-      .http_only(self.config.http_only)
-      .same_site(self.config.same_site)
-      .max_age(time::Duration::seconds(0));
-    if self.config.secure {
-      builder = builder.secure(true);
-    }
-    if let Some(ref domain) = self.config.domain {
-      builder = builder.domain(domain.clone());
-    }
-    builder.build().to_string().parse().unwrap()
+    self
+      .deletion_cookie
+      .get_or_init(|| {
+        let mut builder = cookie::CookieBuilder::new(self.config.cookie_name.clone(), "")
+          .path(self.config.path.clone())
+          .http_only(self.config.http_only)
+          .same_site(self.config.same_site)
+          .max_age(time::Duration::seconds(0));
+        if self.config.secure {
+          builder = builder.secure(true);
+        }
+        if let Some(ref domain) = self.config.domain {
+          builder = builder.domain(domain.clone());
+        }
+        builder
+          .build()
+          .to_string()
+          .parse()
+          .expect("deletion cookie is a valid header value")
+      })
+      .clone()
   }
 
   /// Extracts the session cookie value from a request's headers.

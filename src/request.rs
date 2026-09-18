@@ -394,6 +394,10 @@ impl Request {
 
   /// Returns the cookie with the given name from the request's `Cookie` header.
   ///
+  /// Names are compared with a zero-allocation scan; only the matching
+  /// cookie is parsed, so the cost does not grow with the number of cookies
+  /// the client sends.
+  ///
   /// # Arguments
   ///
   /// * `name` - The cookie name
@@ -407,12 +411,7 @@ impl Request {
   /// ```
   pub fn cookie(&self, name: &str) -> Option<cookie::Cookie<'static>> {
     let header = self.inner.headers().get(hyper::header::COOKIE)?;
-    let header = header.to_str().ok()?;
-    header
-      .split(';')
-      .filter_map(|part| cookie::Cookie::parse(part.trim()).ok())
-      .find(|c| c.name() == name)
-      .map(|c| c.into_owned())
+    cookie_from_header(header, name)
   }
 
   /// Returns the resolved client IP.
@@ -484,5 +483,104 @@ impl Request {
 impl From<HyperRequest> for Request {
   fn from(request: HyperRequest) -> Self {
     Request::new(request, None)
+  }
+}
+
+/// Finds `name` in a raw `Cookie` header value and parses only the matching
+/// cookie. Name comparison is a zero-allocation scan, so cost does not grow
+/// with the number of cookies the client sends.
+fn cookie_from_header(
+  header: &hyper::header::HeaderValue,
+  name: &str,
+) -> Option<cookie::Cookie<'static>> {
+  let header = header.to_str().ok()?;
+  header
+    .split(';')
+    .filter(|part| {
+      let part = part.trim();
+      match part.split_once('=') {
+        Some((part_name, _)) => part_name.trim() == name,
+        // A bare token (no `=`) is its own name.
+        None => part == name,
+      }
+    })
+    .find_map(|part| cookie::Cookie::parse(part.trim()).ok())
+    .map(cookie::Cookie::into_owned)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn cookie_header(value: &'static str) -> hyper::header::HeaderValue {
+    hyper::header::HeaderValue::from_static(value)
+  }
+
+  #[test]
+  fn test_cookie_finds_match_among_many() {
+    let header = cookie_header("theme=dark; session=abc123; consent=1");
+    let found = cookie_from_header(&header, "session").unwrap();
+    assert_eq!(found.name(), "session");
+    assert_eq!(found.value(), "abc123");
+  }
+
+  #[test]
+  fn test_cookie_value_may_contain_equals() {
+    // Base64 padding in the value must not be truncated at the first `=`.
+    let header = cookie_header("session=abc=; theme=dark");
+    let found = cookie_from_header(&header, "session").unwrap();
+    assert_eq!(found.value(), "abc=");
+  }
+
+  #[test]
+  fn test_cookie_name_is_not_prefix_matched() {
+    let header = cookie_header("sessionx=1; session=2");
+    assert_eq!(cookie_from_header(&header, "session").unwrap().value(), "2");
+    assert_eq!(
+      cookie_from_header(&header, "sessionx").unwrap().value(),
+      "1"
+    );
+  }
+
+  #[test]
+  fn test_cookie_missing_returns_none() {
+    let header = cookie_header("theme=dark; consent=1");
+    assert!(cookie_from_header(&header, "session").is_none());
+    assert!(cookie_from_header(&cookie_header(""), "session").is_none());
+  }
+
+  #[test]
+  fn test_cookie_whitespace_tolerant() {
+    // Semicolon-separated parts are trimmed before the name scan. The
+    // matched part is handed to the cookie crate unchanged, so its own
+    // whitespace handling (spaces around `=` are tolerated) is preserved.
+    let header = cookie_header("theme=dark;\t session=spaced ");
+    let found = cookie_from_header(&header, "session").unwrap();
+    assert_eq!(found.value(), "spaced");
+    let spaced = cookie_header("session = spaced");
+    assert_eq!(
+      cookie_from_header(&spaced, "session").unwrap().value(),
+      "spaced"
+    );
+  }
+
+  #[test]
+  fn test_cookie_unparseable_parts_are_skipped() {
+    // Parts whose name does not match are never parsed; the scan continues
+    // past them (here, a name with a space that some clients send).
+    let header = cookie_header("a b=c; session=ok");
+    assert_eq!(
+      cookie_from_header(&header, "session").unwrap().value(),
+      "ok"
+    );
+  }
+
+  #[test]
+  fn test_cookie_duplicate_names_first_wins() {
+    let header = cookie_header("session=first; session=second");
+    assert_eq!(
+      cookie_from_header(&header, "session").unwrap().value(),
+      "first"
+    );
   }
 }

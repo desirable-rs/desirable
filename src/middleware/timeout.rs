@@ -34,9 +34,9 @@ impl Middleware for Timeout {
   async fn handle(&self, req: Request, next: Next<'_>) -> Result {
     match tokio::time::timeout(self.duration, next.run(req)).await {
       Ok(response) => response,
-      Err(_elapsed) => Ok(Response::with_status_code(
+      Err(_elapsed) => Ok(Response::static_text(
         hyper::StatusCode::REQUEST_TIMEOUT,
-        "request timeout".to_string(),
+        "request timeout",
       )),
     }
   }

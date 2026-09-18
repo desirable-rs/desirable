@@ -110,12 +110,6 @@ impl RateLimit {
       false
     }
   }
-
-  /// Whole seconds until the client's bucket refills enough for one request
-  /// (at least 1).
-  fn retry_after_secs(&self) -> u64 {
-    1
-  }
 }
 
 #[async_trait::async_trait]
@@ -128,10 +122,13 @@ impl Middleware for RateLimit {
     };
 
     if !allowed {
-      let mut response = Response::with_status(429, "too many requests".to_string())?;
+      // The 429 path is the one that gets hammered under load, so it is
+      // allocation-free: static body, static Retry-After.
+      let mut response =
+        Response::static_text(hyper::StatusCode::TOO_MANY_REQUESTS, "too many requests");
       response.set_header(
         hyper::header::RETRY_AFTER,
-        self.retry_after_secs().to_string().parse().unwrap(),
+        hyper::header::HeaderValue::from_static("1"),
       );
       return Ok(response);
     }
