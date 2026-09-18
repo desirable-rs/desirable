@@ -713,3 +713,154 @@ async fn session_destroy_sends_deletion_cookie() {
   // NOTE: stateless signed cookies cannot be revoked server-side — replaying
   // the old value still verifies. Server-side revocation needs a store.
 }
+
+#[tokio::test]
+async fn range_requests_serve_partial_content() {
+  let dir = std::env::temp_dir().join(format!("desirable-range-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  let content: Vec<u8> = (0..=255u8).collect();
+  std::fs::write(dir.join("data.bin"), &content).unwrap();
+
+  let mut app = Router::new();
+  app.get(
+    "/static/*file",
+    desirable::ServeDir::new(dir.clone()).cache_control("public, max-age=60"),
+  );
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // bytes=0-9: first ten bytes, 206 + Content-Range.
+  let req = "GET /static/data.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-9\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, req).await;
+  assert!(res.starts_with("HTTP/1.1 206"), "got: {}", res);
+  assert!(res.contains("content-range: bytes 0-9/256"), "got: {}", res);
+  assert!(res.contains("content-length: 10"), "got: {}", res);
+  let body = res.split("\r\n\r\n").nth(1).unwrap_or("");
+  assert_eq!(body.as_bytes(), &content[0..10]);
+
+  // bytes=-4: last four bytes (binary body -> byte-level request).
+  let req = "GET /static/data.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=-4\r\nConnection: close\r\n\r\n";
+  let raw = raw_request_bytes(addr, req).await;
+  let split = raw
+    .windows(4)
+    .position(|w| w == b"\r\n\r\n")
+    .expect("response must contain a header/body separator");
+  let (headers, body) = raw.split_at(split + 4);
+  let headers = String::from_utf8(headers.to_vec()).unwrap();
+  assert!(headers.starts_with("HTTP/1.1 206"), "got: {}", headers);
+  assert!(
+    headers.contains("content-range: bytes 252-255/256"),
+    "got: {}",
+    headers
+  );
+  assert_eq!(body, &content[252..256]);
+
+  // bytes=300- : unsatisfiable -> 416 with bytes */256.
+  let req = "GET /static/data.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=300-\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, req).await;
+  assert!(res.starts_with("HTTP/1.1 416"), "got: {}", res);
+  assert!(res.contains("content-range: bytes */256"), "got: {}", res);
+
+  // No Range: full 200 (binary body -> byte-level request).
+  let raw = raw_request_bytes(addr, &get_request("/static/data.bin")).await;
+  let split = raw
+    .windows(4)
+    .position(|w| w == b"\r\n\r\n")
+    .expect("response must contain a header/body separator");
+  let (headers, body) = raw.split_at(split + 4);
+  let headers = String::from_utf8(headers.to_vec()).unwrap();
+  assert!(headers.starts_with("HTTP/1.1 200"), "got: {}", headers);
+  assert!(
+    headers.contains("cache-control: public, max-age=60"),
+    "got: {}",
+    headers
+  );
+  assert_eq!(body, &content[..]);
+
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn strong_etag_supports_conditional_requests() {
+  let dir = std::env::temp_dir().join(format!("desirable-etag-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  std::fs::write(dir.join("page.html"), b"<h1>stable</h1>").unwrap();
+
+  let mut app = Router::new();
+  app.get(
+    "/static/*file",
+    desirable::ServeDir::new(dir.clone()).strong_etag(true),
+  );
+
+  let (addr, _server) = spawn_server(app).await;
+
+  let res = raw_request(addr, &get_request("/static/page.html")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  let etag_line = res
+    .lines()
+    .find(|l| l.to_ascii_lowercase().starts_with("etag:"))
+    .expect("etag must be present")
+    .to_string();
+  // Strong: no W/ prefix.
+  assert!(!etag_line.contains("W/"), "got: {}", etag_line);
+
+  let etag = etag_line
+    .split(':')
+    .nth(1)
+    .unwrap_or_default()
+    .trim()
+    .to_string();
+  let conditional = format!(
+    "GET /static/page.html HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: {}\r\nConnection: close\r\n\r\n",
+    etag
+  );
+  let res = raw_request(addr, &conditional).await;
+  assert!(res.starts_with("HTTP/1.1 304"), "got: {}", res);
+
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn trusted_proxies_resolve_client_ip() {
+  // Rate limit to 1 request per client IP: lets us observe which IP the
+  // limiter sees (forwarded vs peer).
+  let mut app = Router::new();
+  app.with(desirable::RateLimit::per_second(1));
+  app.get("/ip", |req: Request| async move {
+    let ip = req.client_ip().map(|i| i.to_string()).unwrap_or_default();
+    desirable::Response::builder().text(ip)
+  });
+
+  let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = probe.local_addr().unwrap();
+  drop(probe);
+
+  let server = desirable::Server::try_bind(&addr.to_string())
+    .unwrap()
+    .trusted_proxies(["127.0.0.1"]);
+  let server_task = tokio::spawn(async move {
+    server
+      .run_with_shutdown(app, std::future::pending::<()>())
+      .await
+      .unwrap();
+  });
+  for _ in 0..100 {
+    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+
+  // Peer 127.0.0.1 is trusted: the X-Forwarded-For IP wins and the limiter
+  // buckets on it (first request for 203.0.113.7 passes).
+  let req = "GET /ip HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.7\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("203.0.113.7"), "got: {}", res);
+
+  // Second request: rate limited on the forwarded IP.
+  let res = raw_request(addr, req).await;
+  assert!(res.starts_with("HTTP/1.1 429"), "got: {}", res);
+
+  server_task.abort();
+}

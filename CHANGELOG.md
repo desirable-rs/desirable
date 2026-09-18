@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.2.0] - 2026-09-18
+
+### Added
+
+- **Range requests** for `ServeFile`/`ServeDir`: single-range
+  `bytes=start-end` / `bytes=start-` / `bytes=-suffix` are served as
+  `206 Partial Content` with `Content-Range` and an exact `Content-Length`
+  (seek + bounded stream). Unsatisfiable ranges return `416` with
+  `Content-Range: bytes */total`; multi-range and non-`bytes` units are
+  ignored (full 200), as RFC 9110 permits. `If-Range` mismatches fall back
+  to the full body.
+- **Strong ETag option**: `ServeDir::strong_etag(true)` /
+  `ServeFile::strong_etag(true)` replaces the default weak `mtime`+`size`
+  validator with a SHA-256 content hash (`"<hash>-<size>"`). Computed once
+  per file version and cached by path+mtime+size.
+- **Trusted proxies + client IP**: `Server::trusted_proxies(["10.0.0.0/8",
+  "127.0.0.1"])` — when the peer is inside a trusted network, the client IP
+  is resolved by walking `X-Forwarded-For` right-to-left and taking the
+  first non-trusted address. Exposed via `Request::client_ip()` and used as
+  the `RateLimit` bucket key. Off by default.
+
+### Breaking
+
+- `server::dispatch` and the `Svc` struct gained a `trusted_proxies`
+  parameter/field (they were always documented as internal, but are `pub`).
+- `RateLimit` buckets are keyed on the resolved client IP (previously always
+  the peer address).
+
+---
+
 ## [2.1.0] - 2026-09-18
 
 ### Added
@@ -372,6 +402,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.2.0]: https://github.com/desirable-rs/desirable/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/desirable-rs/desirable/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/desirable-rs/desirable/compare/v1.10.0...v2.0.0
 [1.10.0]: https://github.com/desirable-rs/desirable/compare/v1.9.0...v1.10.0

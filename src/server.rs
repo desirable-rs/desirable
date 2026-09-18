@@ -5,6 +5,7 @@ use crate::Router;
 use hyper::server::conn::http1;
 use hyper::service::Service;
 use hyper_util::rt::TokioIo;
+use ipnet::IpNet;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -27,6 +28,8 @@ pub struct Svc {
   pub router: Arc<Router>,
   /// The remote address of the client
   pub remote_addr: Arc<SocketAddr>,
+  /// Trusted proxy networks used to resolve the real client IP
+  pub trusted_proxies: Arc<Vec<IpNet>>,
 }
 
 impl Service<HyperRequest> for Svc {
@@ -37,7 +40,8 @@ impl Service<HyperRequest> for Svc {
   fn call(&self, req: HyperRequest) -> Self::Future {
     let router = self.router.clone();
     let remote_addr = self.remote_addr.clone();
-    let res = async { dispatch(req, remote_addr, router).await };
+    let trusted = self.trusted_proxies.clone();
+    let res = async { dispatch(req, remote_addr, trusted, router).await };
     Box::pin(res)
   }
 }
@@ -59,10 +63,49 @@ impl Service<HyperRequest> for Svc {
 pub async fn dispatch(
   req: HyperRequest,
   remote_addr: Arc<SocketAddr>,
+  trusted_proxies: Arc<Vec<IpNet>>,
   router: Arc<Router>,
 ) -> Result<HyperResponse> {
+  let mut req = req;
+  let client_ip = resolve_client_ip(remote_addr.ip(), &req, &trusted_proxies);
+  req
+    .extensions_mut()
+    .insert(crate::request::ClientIp(client_ip));
   let response = router.dispatch(req.into(), remote_addr).await?;
   Ok(response.inner)
+}
+
+/// Resolves the real client IP: the first non-trusted address walking the
+/// `X-Forwarded-For` chain from right to left. Falls back to the peer
+/// address when absent, malformed, or entirely trusted.
+fn resolve_client_ip(
+  peer: std::net::IpAddr,
+  req: &HyperRequest,
+  trusted: &[IpNet],
+) -> std::net::IpAddr {
+  use std::net::IpAddr;
+
+  let Some(xff) = req
+    .headers()
+    .get("x-forwarded-for")
+    .and_then(|v| v.to_str().ok())
+  else {
+    return peer;
+  };
+  let mut client = peer;
+  for part in xff.split(',').rev().map(str::trim) {
+    match part.parse::<IpAddr>() {
+      Ok(ip) => {
+        if trusted.iter().any(|net| net.contains(&ip)) {
+          client = ip; // trusted hop: keep walking left
+        } else {
+          return ip; // first untrusted address from the right
+        }
+      }
+      Err(_) => break, // malformed entry: stop trusting the chain
+    }
+  }
+  client
 }
 
 /// The HTTP server.
@@ -88,6 +131,8 @@ pub struct Server {
   addr: SocketAddr,
   /// Maximum time in-flight connections are given to finish after shutdown
   drain_timeout: Duration,
+  /// Proxy networks trusted to set `X-Forwarded-For`
+  trusted_proxies: Vec<IpNet>,
 }
 
 impl Server {
@@ -115,6 +160,7 @@ impl Server {
     Ok(Server {
       addr,
       drain_timeout: DEFAULT_DRAIN_TIMEOUT,
+      trusted_proxies: Vec::new(),
     })
   }
 
@@ -125,6 +171,45 @@ impl Server {
   #[must_use]
   pub fn drain_timeout(mut self, timeout: Duration) -> Self {
     self.drain_timeout = timeout;
+    self
+  }
+
+  /// Declares proxy networks trusted to set `X-Forwarded-For`.
+  ///
+  /// Accepts CIDR strings and bare IPs. When the immediate peer is inside a
+  /// trusted network, the client IP is resolved by walking
+  /// `X-Forwarded-For` from right to left and taking the first address that
+  /// is NOT in a trusted network; the result is exposed via
+  /// [`Request::client_ip`](crate::Request::client_ip) and used by the
+  /// [`RateLimit`](crate::RateLimit) middleware.
+  ///
+  /// Off by default: without trusted proxies the header is never trusted.
+  ///
+  /// # Panics
+  ///
+  /// Panics if an entry is not a valid IP or CIDR string.
+  #[must_use]
+  pub fn trusted_proxies<I, S>(mut self, proxies: I) -> Self
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    self.trusted_proxies = proxies
+      .into_iter()
+      .map(|s| {
+        let raw = s.as_ref();
+        match raw.parse::<IpNet>() {
+          Ok(net) => net,
+          Err(_) => {
+            // Bare IP: treat as a /32 (v4) or /128 (v6) host route.
+            let ip: std::net::IpAddr = raw
+              .parse()
+              .unwrap_or_else(|_| panic!("invalid trusted proxy: {raw:?}"));
+            IpNet::new(ip, if ip.is_ipv4() { 32 } else { 128 }).expect("host prefix is valid")
+          }
+        }
+      })
+      .collect();
     self
   }
 
@@ -184,9 +269,10 @@ impl Server {
     let router = Arc::new(router);
     let tracker = TaskTracker::new();
     let shutdown = CancellationToken::new();
+    let trusted = Arc::new(self.trusted_proxies.clone());
 
     tokio::select! {
-      result = accept_loop(listener, router, &tracker, shutdown.clone()) => {
+      result = accept_loop(listener, router, &tracker, shutdown.clone(), Arc::clone(&trusted)) => {
         result?;
       }
       _ = signal => {
@@ -214,10 +300,12 @@ async fn accept_loop(
   router: Arc<Router>,
   tracker: &TaskTracker,
   shutdown: CancellationToken,
+  trusted: Arc<Vec<IpNet>>,
 ) -> Result<()> {
   loop {
     tokio::select! {
       accepted = listener.accept() => {
+
         let (stream, remote_addr) = accepted?;
         // Reduce latency for small request/response pairs; failure is benign.
         if let Err(err) = stream.set_nodelay(true) {
@@ -226,6 +314,7 @@ async fn accept_loop(
         let io = TokioIo::new(stream);
         let remote_addr = Arc::new(remote_addr);
         let router = Arc::clone(&router);
+        let trusted = Arc::clone(&trusted);
         let shutdown = shutdown.clone();
         tracker.spawn(async move {
           let conn = http1::Builder::new().serve_connection(
@@ -233,6 +322,7 @@ async fn accept_loop(
             Svc {
               router,
               remote_addr,
+              trusted_proxies: Arc::clone(&trusted),
             },
           );
           tokio::pin!(conn);

@@ -7,9 +7,14 @@ use bytes::Bytes;
 use hyper::http::Extensions;
 use route_recognizer::Params;
 use std::any::Any;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::debug;
+
+/// Extension carrying the resolved client IP (see
+/// [`Request::client_ip`](Request::client_ip)).
+#[derive(Debug, Clone, Copy)]
+pub struct ClientIp(pub IpAddr);
 
 /// The HTTP request type for the desirable framework.
 ///
@@ -407,6 +412,20 @@ impl Request {
       .filter_map(|part| cookie::Cookie::parse(part.trim()).ok())
       .find(|c| c.name() == name)
       .map(|c| c.into_owned())
+  }
+
+  /// Returns the resolved client IP.
+  ///
+  /// When the server was configured with
+  /// [`Server::trusted_proxies`](crate::Server::trusted_proxies) and the
+  /// request came through a trusted proxy carrying `X-Forwarded-For`, this
+  /// is the first non-trusted address of the chain. Otherwise it is the
+  /// immediate peer address.
+  pub fn client_ip(&self) -> Option<std::net::IpAddr> {
+    if let Some(client) = self.inner.extensions().get::<ClientIp>() {
+      return Some(client.0);
+    }
+    Some(self.remote_addr.as_deref()?.ip())
   }
 
   /// Returns the shared application state set via

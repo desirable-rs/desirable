@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 
 /// Returns the MIME type for a file based on its extension.
 ///
@@ -117,6 +118,15 @@ impl ServeFile {
     self.options.precompressed = yes;
     self
   }
+
+  /// Uses a strong content-hash ETag instead of the default weak
+  /// `mtime`+`size` validator. The hash is computed once per file version
+  /// and cached.
+  #[must_use]
+  pub fn strong_etag(mut self, yes: bool) -> Self {
+    self.options.strong_etag = yes;
+    self
+  }
 }
 
 #[async_trait::async_trait]
@@ -145,6 +155,8 @@ struct ServeOptions {
   /// Serves `.br`/`.gz` siblings with `Content-Encoding` when the client
   /// accepts them.
   precompressed: bool,
+  /// Strong content-hash ETag instead of the default weak validator.
+  strong_etag: bool,
 }
 
 /// Returns true when the request's `Accept-Encoding` mentions `token`.
@@ -158,6 +170,74 @@ fn accepts_encoding(req: &Request, token: &str) -> bool {
     })
 }
 
+/// The outcome of parsing a `Range` header against a resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ByteRange {
+  /// No usable `Range` header: serve the full body with 200.
+  None,
+  /// Serve `len` bytes starting at `start` with 206.
+  Satisfiable(u64, u64),
+  /// The range is outside the resource: 416.
+  Unsatisfiable,
+}
+
+/// Parses a single-range `bytes=` header (start-end, start-, or -suffix).
+///
+/// Multi-range and non-`bytes` units are not supported and yield
+/// [`ByteRange::None`] (a full 200 response), which RFC 9110 permits.
+fn parse_byte_range(header: &str, total: u64) -> ByteRange {
+  let Some(spec) = header.strip_prefix("bytes=") else {
+    return ByteRange::None;
+  };
+  if spec.contains(',') {
+    return ByteRange::None;
+  }
+  let Some((start_str, end_str)) = spec.split_once('-') else {
+    return ByteRange::None;
+  };
+  match (start_str.is_empty(), end_str.is_empty()) {
+    // bytes=-N: final N bytes
+    (true, false) => {
+      let Ok(n) = end_str.parse::<u64>() else {
+        return ByteRange::None;
+      };
+      if n == 0 || total == 0 {
+        return ByteRange::Unsatisfiable;
+      }
+      let start = total.saturating_sub(n);
+      ByteRange::Satisfiable(start, total - start)
+    }
+    // bytes=start-end / bytes=start-
+    (false, _) => {
+      let Ok(start) = start_str.parse::<u64>() else {
+        return ByteRange::None;
+      };
+      let end = if end_str.is_empty() {
+        total.saturating_sub(1)
+      } else {
+        match end_str.parse::<u64>() {
+          Ok(v) => v,
+          Err(_) => return ByteRange::None,
+        }
+      };
+      if end < start || start >= total {
+        return ByteRange::Unsatisfiable;
+      }
+      ByteRange::Satisfiable(start, end.min(total - 1) - start + 1)
+    }
+    (true, true) => ByteRange::None,
+  }
+}
+
+/// `If-Range` gate: when the header is present it must match the current
+/// ETag, otherwise the `Range` header is ignored.
+fn if_range_allows(req: &Request, etag: &str) -> bool {
+  match req.header("if-range").and_then(|v| v.to_str().ok()) {
+    None => true,
+    Some(if_range) => if_range == etag || if_range == etag.trim_start_matches("W/"),
+  }
+}
+
 /// Builds a response for the file at `path`, honoring HTTP conditional
 /// requests.
 ///
@@ -166,6 +246,81 @@ fn accepts_encoding(req: &Request, token: &str) -> bool {
 /// `If-None-Match` matches the ETag (or `If-Modified-Since` is not earlier
 /// than the file's modification time and no `If-None-Match` is present),
 /// responds `304 Not Modified` with an empty body.
+/// Applies the validators/cache/encoding headers shared by every file
+/// response (200/206/304/416).
+fn common_headers(
+  mut builder: hyper::http::response::Builder,
+  etag: &str,
+  last_modified: &str,
+  options: &ServeOptions,
+  encoding: Option<&'static str>,
+) -> hyper::http::response::Builder {
+  builder = builder
+    .header(header::ETAG, etag)
+    .header(header::LAST_MODIFIED, last_modified);
+  if let Some(cache_control) = &options.cache_control {
+    builder = builder.header(header::CACHE_CONTROL, cache_control.clone());
+  }
+  if let Some(enc) = encoding {
+    builder = builder.header(header::CONTENT_ENCODING, enc);
+  }
+  if options.precompressed {
+    builder = builder.header(header::VARY, "Accept-Encoding");
+  }
+  builder
+}
+
+/// Computes (and caches by path+mtime+size) a strong content-hash ETag.
+///
+/// The first request for each file version reads the whole file; later
+/// requests reuse the cache until the file changes.
+async fn strong_etag_for(
+  path: &Path,
+  file: &mut tokio::fs::File,
+  meta: &std::fs::Metadata,
+) -> std::io::Result<String> {
+  use sha2::{Digest, Sha256};
+  use std::collections::HashMap;
+  use std::sync::{Mutex, OnceLock};
+
+  type EtagCache = Mutex<HashMap<PathBuf, (u64, u64, String)>>;
+
+  static CACHE: OnceLock<EtagCache> = OnceLock::new();
+  let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+  let mtime_secs = meta
+    .modified()?
+    .duration_since(UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or(0);
+  let size = meta.len();
+
+  if let Some((m, l, tag)) = cache.lock().unwrap().get(path)
+    && *m == mtime_secs
+    && *l == size
+  {
+    return Ok(tag.clone());
+  }
+
+  let mut buf = Vec::with_capacity(size as usize);
+  file.seek(std::io::SeekFrom::Start(0)).await?;
+  file.read_to_end(&mut buf).await?;
+  file.seek(std::io::SeekFrom::Start(0)).await?;
+
+  let digest = Sha256::digest(&buf);
+  let hex: String = digest[..16].iter().map(|b| format!("{:02x}", b)).collect();
+  let tag = format!("\"{}-{}\"", hex, size);
+
+  {
+    let mut map = cache.lock().unwrap();
+    if map.len() >= 1024 {
+      map.clear();
+    }
+    map.insert(path.to_path_buf(), (mtime_secs, size, tag.clone()));
+  }
+  Ok(tag)
+}
+
 async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOptions) -> Result {
   // A missing file is a client-visible 404, not a server error.
   let (mut file, meta) = match open_for_serve(path).await {
@@ -204,44 +359,90 @@ async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOption
     }
   }
 
+  let etag = if options.strong_etag {
+    strong_etag_for(path, &mut file, &meta).await?
+  } else {
+    etag
+  };
+
   let not_modified = is_not_modified(req, &etag, modified);
   if not_modified {
-    let mut builder = hyper::Response::builder()
-      .status(hyper::StatusCode::NOT_MODIFIED)
-      .header(header::ETAG, etag.as_str())
-      .header(header::LAST_MODIFIED, last_modified);
-    if let Some(cache_control) = &options.cache_control {
-      builder = builder.header(header::CACHE_CONTROL, cache_control.clone());
-    }
-    if let Some(enc) = encoding {
-      builder = builder.header(header::CONTENT_ENCODING, enc);
-    }
-    if options.precompressed {
-      builder = builder.header(header::VARY, "Accept-Encoding");
-    }
-    let response = builder.body(Body::empty())?;
+    let response = common_headers(
+      hyper::Response::builder().status(hyper::StatusCode::NOT_MODIFIED),
+      etag.as_str(),
+      &last_modified,
+      options,
+      encoding,
+    )
+    .body(Body::empty())?;
     return Ok(response.into());
   }
 
-  let len = file.metadata().await?.len();
+  let served_len = file.metadata().await?.len();
+
+  // Single-range requests (206/416). Ranges apply to the representation
+  // actually served (a precompressed sibling, when selected).
+  let mut partial: Option<(u64, u64)> = None; // (start, len)
+  let mut unsatisfiable = false;
+  if let Some(spec) = req.header("range").and_then(|v| v.to_str().ok())
+    && if_range_allows(req, &etag)
+  {
+    match parse_byte_range(spec, served_len) {
+      ByteRange::Satisfiable(start, len) => {
+        if file.seek(std::io::SeekFrom::Start(start)).await.is_ok() {
+          partial = Some((start, len));
+        }
+      }
+      ByteRange::Unsatisfiable => unsatisfiable = true,
+      ByteRange::None => {}
+    }
+  }
+
+  if unsatisfiable {
+    let response = common_headers(
+      hyper::Response::builder().status(hyper::StatusCode::RANGE_NOT_SATISFIABLE),
+      etag.as_str(),
+      &last_modified,
+      options,
+      encoding,
+    )
+    .header(header::CONTENT_RANGE, format!("bytes */{}", served_len))
+    .body(Body::empty())?;
+    return Ok(response.into());
+  }
+
+  // Stream the file: memory use is one chunk, not the whole file. The exact
+  // length from fstat is preserved as the size hint so hyper sends
+  // Content-Length instead of chunked encoding.
+  let (status, len, content_range) = match partial {
+    Some((start, len)) => (
+      hyper::StatusCode::PARTIAL_CONTENT,
+      len,
+      Some(format!(
+        "bytes {}-{}/{}",
+        start,
+        start + len - 1,
+        served_len
+      )),
+    ),
+    None => (hyper::StatusCode::OK, served_len, None),
+  };
   let stream = tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024);
   let body = Body::Streaming(BoxBody::new(SizedBody {
     inner: Body::stream(stream),
     len,
   }));
   let mime = mime_for_path(path);
-  let mut builder = hyper::Response::builder()
-    .header(header::CONTENT_TYPE, mime)
-    .header(header::ETAG, etag.as_str())
-    .header(header::LAST_MODIFIED, last_modified);
-  if let Some(cache_control) = &options.cache_control {
-    builder = builder.header(header::CACHE_CONTROL, cache_control.clone());
-  }
-  if let Some(enc) = encoding {
-    builder = builder.header(header::CONTENT_ENCODING, enc);
-  }
-  if options.precompressed {
-    builder = builder.header(header::VARY, "Accept-Encoding");
+  let mut builder = common_headers(
+    hyper::Response::builder().status(status),
+    etag.as_str(),
+    &last_modified,
+    options,
+    encoding,
+  )
+  .header(header::CONTENT_TYPE, mime);
+  if let Some(cr) = content_range {
+    builder = builder.header(header::CONTENT_RANGE, cr);
   }
   let response = builder.body(body)?;
   Ok(response.into())
@@ -384,6 +585,15 @@ impl ServeDir {
     self.options.precompressed = yes;
     self
   }
+
+  /// Uses a strong content-hash ETag instead of the default weak
+  /// `mtime`+`size` validator. The hash is computed once per file version
+  /// and cached.
+  #[must_use]
+  pub fn strong_etag(mut self, yes: bool) -> Self {
+    self.options.strong_etag = yes;
+    self
+  }
 }
 
 #[async_trait::async_trait]
@@ -494,6 +704,50 @@ mod tests {
     let base = PathBuf::from("/var/www/static");
     // On unix, "/etc/passwd" has a RootDir component and must be rejected.
     assert!(resolve_within(&base, "/etc/passwd").is_none());
+  }
+
+  #[test]
+  fn test_parse_byte_range() {
+    use super::ByteRange;
+    use super::parse_byte_range;
+
+    let total = 100;
+    // Full forms
+    assert_eq!(
+      parse_byte_range("bytes=0-9", total),
+      ByteRange::Satisfiable(0, 10)
+    );
+    assert_eq!(
+      parse_byte_range("bytes=10-", total),
+      ByteRange::Satisfiable(10, 90)
+    );
+    assert_eq!(
+      parse_byte_range("bytes=-5", total),
+      ByteRange::Satisfiable(95, 5)
+    );
+    // End beyond the resource clamps to the last byte.
+    assert_eq!(
+      parse_byte_range("bytes=95-200", total),
+      ByteRange::Satisfiable(95, 5)
+    );
+    // Unsatisfiable
+    assert_eq!(
+      parse_byte_range("bytes=100-", total),
+      ByteRange::Unsatisfiable
+    );
+    assert_eq!(
+      parse_byte_range("bytes=-0", total),
+      ByteRange::Unsatisfiable
+    );
+    assert_eq!(
+      parse_byte_range("bytes=5-4", total),
+      ByteRange::Unsatisfiable
+    );
+    assert_eq!(parse_byte_range("bytes=-5", 0), ByteRange::Unsatisfiable);
+    // Unsupported forms: full 200
+    assert_eq!(parse_byte_range("bytes=0-4,10-19", total), ByteRange::None);
+    assert_eq!(parse_byte_range("items=0-9", total), ByteRange::None);
+    assert_eq!(parse_byte_range("garbage", total), ByteRange::None);
   }
 
   #[tokio::test]

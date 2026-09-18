@@ -15,7 +15,7 @@ name = "desirable"
 publish = true # no accidents while in dev
 readme = "README.md"
 repository = "https://github.com/desirable-rs/desirable"
-version = "2.1.0"
+version = "2.2.0"
 
 include = [
   "Cargo.toml",
@@ -38,6 +38,7 @@ futures-core = "^0.3"
 http-body = "^1.0.1"
 http-body-util = "^0.1.4"
 hyper = { version = "^1.8.1", features = ["full"] }
+ipnet = "^2"
 hyper-util = { version = "^0.1.19", features = ["full"] }
 httpdate = "^1.0.3"
 mime = "^0.3.17"

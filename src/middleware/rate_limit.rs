@@ -97,8 +97,8 @@ impl RateLimit {
 #[async_trait::async_trait]
 impl Middleware for RateLimit {
   async fn handle(&self, req: Request, next: Next<'_>) -> Result {
-    let allowed = match req.remote_addr.as_ref() {
-      Some(addr) => self.try_acquire(&addr.ip()),
+    let allowed = match req.client_ip() {
+      Some(ip) => self.try_acquire(&ip),
       // No peer address (e.g. direct Request construction): don't limit.
       None => true,
     };
