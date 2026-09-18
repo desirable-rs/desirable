@@ -24,3 +24,7 @@ jobs:
       run: cargo build --all-features --verbose
     - name: Run tests (all features)
       run: cargo test --all-features --verbose
+    - name: Clippy (all features, deny warnings)
+      run: cargo clippy --all-targets --all-features -- -D warnings
+    - name: Formatting
+      run: cargo fmt --check

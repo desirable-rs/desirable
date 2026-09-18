@@ -22,6 +22,11 @@ use tracing::{debug, error, info, warn};
 /// shutdown signal before the server gives up waiting.
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Maximum time a TLS handshake may take before the connection is dropped
+/// (feature `tls`).
+#[cfg(feature = "tls")]
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// What the server binds to.
 #[derive(Clone, Debug)]
 enum BindTarget {
@@ -42,6 +47,9 @@ pub struct Svc {
   pub remote_addr: Option<Arc<SocketAddr>>,
   /// Trusted proxy networks used to resolve the real client IP
   pub trusted_proxies: Arc<Vec<IpNet>>,
+  /// Connection/task tracker shared with the accept loop, so spawned work
+  /// (e.g. WebSocket sessions) is counted by graceful shutdown
+  pub tracker: Arc<TaskTracker>,
 }
 
 impl Service<HyperRequest> for Svc {
@@ -53,7 +61,8 @@ impl Service<HyperRequest> for Svc {
     let router = self.router.clone();
     let remote_addr = self.remote_addr.clone();
     let trusted = self.trusted_proxies.clone();
-    let res = async { dispatch(req, remote_addr, trusted, router).await };
+    let tracker = Arc::clone(&self.tracker);
+    let res = async { dispatch(req, remote_addr, trusted, tracker, router).await };
     Box::pin(res)
   }
 }
@@ -77,9 +86,11 @@ pub async fn dispatch(
   req: HyperRequest,
   remote_addr: Option<Arc<SocketAddr>>,
   trusted_proxies: Arc<Vec<IpNet>>,
+  tracker: Arc<TaskTracker>,
   router: Arc<Router>,
 ) -> Result<HyperResponse> {
   let mut req = req;
+  req.extensions_mut().insert(tracker);
   if let Some(addr) = &remote_addr {
     let client_ip = resolve_client_ip(addr.ip(), req.headers(), &trusted_proxies);
     req
@@ -377,12 +388,19 @@ impl Server {
   {
     info!("Listening on {}", listener.describe());
     let router = Arc::new(router);
-    let tracker = TaskTracker::new();
+    let tracker = Arc::new(TaskTracker::new());
     let shutdown = CancellationToken::new();
     let trusted = Arc::new(self.trusted_proxies.clone());
 
     tokio::select! {
-      result = accept_loop(listener, router, &tracker, shutdown.clone(), Arc::clone(&trusted), self) => {
+      result = accept_loop(
+        listener,
+        router,
+        Arc::clone(&tracker),
+        shutdown.clone(),
+        Arc::clone(&trusted),
+        self,
+      ) => {
         result?;
       }
       _ = signal => {
@@ -573,7 +591,7 @@ where
 async fn accept_loop<L: Listener>(
   listener: L,
   router: Arc<Router>,
-  tracker: &TaskTracker,
+  tracker: Arc<TaskTracker>,
   shutdown: CancellationToken,
   trusted: Arc<Vec<IpNet>>,
   server: &Server,
@@ -582,85 +600,108 @@ async fn accept_loop<L: Listener>(
   let tls_acceptor = server.tls_acceptor();
 
   loop {
-    tokio::select! {
+    let accept_result = tokio::select! {
       accepted = listener.accept() => {
-        let (io, remote_addr) = accepted?;
-        let router = Arc::clone(&router);
-        let trusted = Arc::clone(&trusted);
-        let shutdown = shutdown.clone();
-        let header_read_timeout = server.header_read_timeout;
-        #[cfg(feature = "tls")]
-        let tls_acceptor = tls_acceptor.clone();
-        tracker.spawn(async move {
-          // auto builder: HTTP/1.1 and ALPN-negotiated HTTP/2 (the h2 client
-          // preface is auto-detected), plus WebSocket upgrade support.
-          let mut builder = hyper_util::server::conn::auto::Builder::new(
-            hyper_util::rt::TokioExecutor::new(),
-          );
-          {
-            let h1 = &mut builder.http1();
-            h1.timer(TokioTimer::new());
-            if let Some(d) = header_read_timeout {
-              h1.header_read_timeout(Some(d));
-            }
+        match accepted {
+          Ok(ok) => ok,
+          // Transient accept failures (interrupted, aborted by the client)
+          // are logged and retried instead of killing the loop.
+          Err(err) if matches!(
+            err.kind(),
+            std::io::ErrorKind::ConnectionAborted
+              | std::io::ErrorKind::Interrupted
+              | std::io::ErrorKind::WouldBlock
+          ) => {
+            warn!("Transient accept error: {}", err);
+            continue;
           }
-          {
-            let h2 = &mut builder.http2();
-            h2.timer(TokioTimer::new());
-          }
-          // TLS handshake (feature `tls`): failures just drop the connection.
-          #[cfg(feature = "tls")]
-          let io = match (tls_acceptor, io) {
-            (Some(acceptor), AcceptedIo::Tcp(tcp)) => {
-              match acceptor.accept(tcp).await {
-                Ok(tls_stream) => {
-                  debug!(
-                    "TLS established, alpn: {:?}",
-                    tls_stream.get_ref().1.alpn_protocol()
-                  );
-                  AnyStream::TlsTcp(TokioIo::new(Box::new(tls_stream)))
-                }
-                Err(err) => {
-                  debug!("TLS handshake failed: {}", err);
-                  return;
-                }
-              }
-            }
-            (None, other) => accepted_to_served(other),
-            #[cfg(unix)]
-            (_, other @ AcceptedIo::Unix(_)) => accepted_to_served(other),
-          };
-          #[cfg(not(feature = "tls"))]
-          let io = accepted_to_served(io);
-          let conn = builder.serve_connection_with_upgrades(
-            io,
-            Svc {
-              router,
-              remote_addr,
-              trusted_proxies: Arc::clone(&trusted),
-            },
-          );
-          tokio::pin!(conn);
-          tokio::select! {
-            result = &mut conn => {
-              if let Err(err) = result {
-                warn!("Connection error: {:?}", err);
-              }
-            }
-            _ = shutdown.cancelled() => {
-              // Stop keep-alive, finish the in-flight request, then exit.
-              conn.as_mut().graceful_shutdown();
-              if let Err(err) = conn.as_mut().await {
-                error!("Connection error during drain: {:?}", err);
-              }
-            }
-          }
-        });
+          Err(err) => return Err(err.into()),
+        }
       }
       _ = shutdown.cancelled() => {
         return Ok(());
       }
-    }
+    };
+    let (io, remote_addr) = accept_result;
+    let router = Arc::clone(&router);
+    let trusted = Arc::clone(&trusted);
+    let shutdown = shutdown.clone();
+    let header_read_timeout = server.header_read_timeout;
+    let conn_tracker = Arc::clone(&tracker);
+    #[cfg(feature = "tls")]
+    let tls_acceptor = tls_acceptor.clone();
+    let svc_tracker = Arc::clone(&conn_tracker);
+    conn_tracker.spawn(async move {
+      // preface is auto-detected), plus WebSocket upgrade support.
+      let mut builder =
+        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+      {
+        let h1 = &mut builder.http1();
+        h1.timer(TokioTimer::new());
+        if let Some(d) = header_read_timeout {
+          h1.header_read_timeout(Some(d));
+        }
+      }
+      {
+        let h2 = &mut builder.http2();
+        h2.timer(TokioTimer::new());
+      }
+      // TLS handshake (feature `tls`): bounded by a handshake timeout and
+      // interrupted by shutdown; failures just drop the connection.
+      #[cfg(feature = "tls")]
+      let io = match (tls_acceptor, io) {
+        (Some(acceptor), AcceptedIo::Tcp(tcp)) => {
+          let handshake = async {
+            let tls_stream = acceptor.accept(tcp).await?;
+            debug!(
+              "TLS established, alpn: {:?}",
+              tls_stream.get_ref().1.alpn_protocol()
+            );
+            Ok::<_, std::io::Error>(AnyStream::TlsTcp(TokioIo::new(Box::new(tls_stream))))
+          };
+          match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, handshake).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+              debug!("TLS handshake failed: {}", err);
+              return;
+            }
+            Err(_) => {
+              debug!("TLS handshake timed out");
+              return;
+            }
+          }
+        }
+        (None, other) => accepted_to_served(other),
+        #[cfg(unix)]
+        (_, other @ AcceptedIo::Unix(_)) => accepted_to_served(other),
+      };
+      #[cfg(not(feature = "tls"))]
+      let io = accepted_to_served(io);
+      let conn = builder.serve_connection_with_upgrades(
+        io,
+        Svc {
+          router,
+          remote_addr,
+          trusted_proxies: Arc::clone(&trusted),
+          tracker: svc_tracker,
+        },
+      );
+      tokio::pin!(conn);
+      tokio::select! {
+        result = &mut conn => {
+          if let Err(err) = result {
+            warn!("Connection error: {:?}", err);
+          }
+        }
+        _ = shutdown.cancelled() => {
+          // Stop keep-alive, finish the in-flight request, then exit.
+          conn.as_mut().graceful_shutdown();
+          if let Err(err) = conn.as_mut().await {
+            error!("Connection error during drain: {:?}", err);
+          }
+        }
+      }
+    });
   }
 }
 

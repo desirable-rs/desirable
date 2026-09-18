@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.7.0] - 2026-09-18
+
+### Fixed
+
+- **Fatal accept errors no longer orphan in-flight connections**: a listener
+  failure (e.g. fd exhaustion) previously returned before the drain phase,
+  killing in-flight requests. The error is now recorded, in-flight
+  connections are drained, and only then is the error surfaced. Transient
+  accept errors (`ConnectionAborted`, `Interrupted`, `WouldBlock`) are
+  logged and retried instead of terminating the loop.
+- **TLS handshakes are bounded and shutdown-aware**: a handshake may take at
+  most 10 seconds and is aborted when the server is shutting down, so
+  stalled handshakes can no longer pin the drain phase.
+- **WebSocket sessions are tracked by graceful shutdown**: the callback task
+  runs on the connection `TaskTracker`, so SIGTERM waits for live WS
+  sessions (bounded by the drain timeout) instead of killing them instantly.
+- **Middleware errors render as responses**: a middleware returning `Err` —
+  or an `into_response` failure — is now rendered through the error pipeline
+  (respecting `set_error_handler`) instead of dropping the connection with
+  no response.
+
+### Changed
+
+- `rust-version = "1.88"` declared (required for let-chains / edition 2024).
+- Jenkins pipeline now actually runs tests (`cargo test --all-features`)
+  and strict clippy; CI gained the same coverage earlier.
+
+---
+
 ## [2.6.0] - 2026-09-18
 
 ### Fixed
@@ -530,6 +559,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.7.0]: https://github.com/desirable-rs/desirable/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/desirable-rs/desirable/compare/v2.5.1...v2.6.0
 [2.5.1]: https://github.com/desirable-rs/desirable/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/desirable-rs/desirable/compare/v2.4.0...v2.5.0

@@ -14,12 +14,12 @@ pipeline {
         }
         stage('Cargo Clippy') {
             steps {
-                sh 'source /root/.cargo/env && cargo clippy'
+                sh 'source /root/.cargo/env && cargo clippy --all-targets --all-features -- -D warnings'
             }
         }
         stage('Cargo Test') {
             steps {
-                sh 'source /root/.cargo/env && cargo build --release'
+                sh 'source /root/.cargo/env && cargo test --all-features'
             }
         }
         stage('Cargo Build') {

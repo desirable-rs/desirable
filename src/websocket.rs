@@ -23,10 +23,12 @@ use crate::body::Body;
 use crate::{Request, Response, Result};
 use futures_util::{SinkExt as _, StreamExt as _};
 use hyper_util::rt::TokioIo;
+use std::sync::Arc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::error::Error as WsError;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
+use tokio_util::task::TaskTracker;
 
 /// A WebSocket message (re-exported from `tungstenite`).
 pub use tokio_tungstenite::tungstenite::Message;
@@ -126,14 +128,16 @@ impl WebSocketUpgrade {
     Fut: std::future::Future<Output = ()> + Send + 'static,
   {
     let accept = derive_accept_key(self.key.as_bytes());
+    // Grab the connection task tracker (if the server provided one) before
+    // moving the request into the session future.
+    let tracker = req.extensions().get::<Arc<TaskTracker>>().cloned();
     let mut inner = req.inner;
-    tokio::spawn(async move {
+    let ws_fut = async move {
       let Ok(upgraded) = hyper::upgrade::on(&mut inner).await else {
         // The request or connection was aborted before the handshake
         // completed; nothing to do.
         return;
       };
-      eprintln!("WS UPGRADE: io acquired");
       let ws = WebSocketStream::from_raw_socket(
         TokioIo::new(upgraded),
         Role::Server,
@@ -141,7 +145,15 @@ impl WebSocketUpgrade {
       )
       .await;
       callback(WebSocketConn::new(ws)).await;
-    });
+    };
+
+    // Run the session on the connection TaskTracker when one is available
+    // (graceful shutdown then waits for live WebSocket sessions).
+    if let Some(tracker) = tracker {
+      tracker.spawn(ws_fut);
+    } else {
+      tokio::spawn(ws_fut);
+    }
 
     let response: hyper::Response<Body> = hyper::Response::builder()
       .status(hyper::StatusCode::SWITCHING_PROTOCOLS)

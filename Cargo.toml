@@ -9,13 +9,14 @@ categories = [
 description = "A minimal Rust web application framework"
 documentation = "https://docs.rs/desirable"
 edition = "2024"
+rust-version = "1.88"
 keywords = ["desirable", "http", "web", "framework", "async"]
 license = "Apache-2.0"
 name = "desirable"
 publish = true # no accidents while in dev
 readme = "README.md"
 repository = "https://github.com/desirable-rs/desirable"
-version = "2.6.0"
+version = "2.7.0"
 
 include = [
   "Cargo.toml",
