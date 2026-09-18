@@ -343,7 +343,7 @@ impl Router {
       async move {
         match crate::websocket::WebSocketUpgrade::from_request(&req) {
           Ok(upgrade) => upgrade.on_upgrade(req, move |conn| callback(conn)),
-          Err(response) => Ok(response),
+          Err(response) => Ok(*response),
         }
       }
     });
@@ -418,7 +418,7 @@ impl Router {
   /// # Returns
   ///
   /// The response from the matched handler or an error
-  pub async fn dispatch(&self, mut req: Request, remote_addr: Arc<SocketAddr>) -> Result {
+  pub async fn dispatch(&self, mut req: Request, remote_addr: Option<Arc<SocketAddr>>) -> Result {
     let mut params = route_recognizer::Params::new();
 
     // HEAD falls back to the GET route table; the body is stripped below.
@@ -462,7 +462,7 @@ impl Router {
       };
 
     req.params = params;
-    req.remote_addr = Some(remote_addr);
+    req.remote_addr = remote_addr;
     if let Some(state) = &self.state {
       req.extensions_mut().insert(Arc::clone(state));
     }

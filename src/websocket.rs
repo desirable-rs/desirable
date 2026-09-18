@@ -84,12 +84,12 @@ impl WebSocketUpgrade {
   /// Returns a `400 Bad Request` response when the required headers
   /// (`Upgrade: websocket`, `Sec-WebSocket-Key`, `Sec-WebSocket-Version: 13`)
   /// are missing or wrong.
-  pub fn from_request(req: &Request) -> std::result::Result<Self, Response> {
+  pub fn from_request(req: &Request) -> std::result::Result<Self, Box<Response>> {
     let bad_request = || {
-      Response::with_status_code(
+      Box::new(Response::with_status_code(
         hyper::StatusCode::BAD_REQUEST,
         "expected a websocket upgrade".to_string(),
-      )
+      ))
     };
     let is_websocket = req
       .header("upgrade")

@@ -25,6 +25,7 @@ arrives.
 | 2.1.0 | Content negotiation & caching | `Compression` middleware (feature-gated gzip), precompressed `.gz`/`.br` static assets, `Cache-Control` config, `Session::destroy()` with deletion-cookie integration, CI `--all-features` coverage |
 | 2.2.0 | Static files & proxy environments | Single-range requests (206/416 + If-Range), strong SHA-256 ETag option with caching, `trusted_proxies` + `Request::client_ip()` (rightmost-untrusted X-Forwarded-For), RateLimit keyed on resolved client IP |
 | 2.3.0 | WebSocket | `Router::websocket` + `WebSocketConn`/`WebSocketUpgrade` behind the `websocket` feature (tokio-tungstenite); hyper `Upgraded` bridged to tokio IO for tungstenite |
+| 2.4.0 | Server capabilities | Unix domain socket servers (`bind_unix`), `run_tcp_listener` for pre-bound listeners, multi-listener deployments with shared shutdown, `http1_header_read_timeout` slow-loris protection |
 
 ## Roadmap: 2.x → 3.0
 
@@ -63,7 +64,7 @@ changes: MSRV/edition, deprecated removals, and the extractor decision.
 - First dependency outside the existing tree — isolated behind its own
   feature so it stays opt-in.
 
-### v2.4 — Server capabilities
+### v2.4 — Server capabilities ✅ shipped
 
 - **Unix domain sockets** (`Server::bind_unix`) alongside TCP.
 - **Multiple listeners** served concurrently with one shared shutdown/drain.

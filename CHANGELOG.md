@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.4.0] - 2026-09-18
+
+### Added
+
+- **Unix domain socket servers** (unix): `Server::bind_unix(path)`; stale
+  socket files are removed before binding. Serves like TCP, with
+  `Request::client_ip()` returning `None`.
+- **`Server::run_tcp_listener(router, listener)`** — serve an already-bound
+  TCP listener (systemd socket activation, tests, pre-bound fd handoff).
+- **Multiple listeners**: spawn one `run_with_shutdown` task per listener
+  with independent shutdown triggers; connections drain per server.
+- **`Server::http1_header_read_timeout(Duration)`** — protects against
+  slow-loris clients that open connections and stall before sending headers.
+  Also doubles as an idle keep-alive timeout.
+
+### Breaking
+
+- `server::dispatch` takes `Option<Arc<SocketAddr>>` for the peer address
+  (Unix sockets have no IP peer); `Svc::remote_addr` likewise.
+- `Server` fields are now private behind `tcp_addr()` (they were private
+  before 2.2's trusted_proxies round except `addr`).
+
+---
+
 ## [2.3.0] - 2026-09-18
 
 ### Added
@@ -419,6 +443,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.4.0]: https://github.com/desirable-rs/desirable/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/desirable-rs/desirable/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/desirable-rs/desirable/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/desirable-rs/desirable/compare/v2.0.0...v2.1.0

@@ -873,20 +873,15 @@ async fn websocket_echo_and_bad_request_fallback() {
   use futures_util::{SinkExt as _, StreamExt as _};
 
   async fn echo(mut conn: WebSocketConn) {
-    loop {
-      match conn.recv().await {
-        Some(Ok(msg)) => {
-          if msg.is_text() || msg.is_binary() {
-            if conn.send(msg).await.is_err() {
-              break;
-            }
-          } else if msg.is_close() {
-            // Flush tungstenite's automatic Close reply.
-            let _ = conn.close().await;
-            break;
-          }
+    while let Some(Ok(msg)) = conn.recv().await {
+      if msg.is_text() || msg.is_binary() {
+        if conn.send(msg).await.is_err() {
+          break;
         }
-        Some(Err(_)) | None => break,
+      } else if msg.is_close() {
+        // Flush tungstenite's automatic Close reply.
+        let _ = conn.close().await;
+        break;
       }
     }
   }
@@ -918,4 +913,196 @@ async fn websocket_echo_and_bad_request_fallback() {
   // Plain routes unaffected.
   let res = raw_request(addr, &get_request("/plain")).await;
   assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_socket_serves_requests() {
+  let mut app = Router::new();
+  app.get("/uds", |req: Request| async move {
+    match req.client_ip() {
+      Some(_) => desirable::Response::builder().text("tcp"),
+      None => desirable::Response::builder().text("unix"),
+    }
+  });
+
+  let path = std::env::temp_dir().join(format!("desirable-uds-{}.sock", std::process::id()));
+  let server = desirable::Server::bind_unix(&path);
+  let server_task = tokio::spawn(async move {
+    server
+      .run_with_shutdown(app, std::future::pending::<()>())
+      .await
+      .unwrap();
+  });
+
+  // Wait for the socket file to appear.
+  for _ in 0..100 {
+    if path.exists() {
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+  let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+  stream
+    .write_all(b"GET /uds HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    .await
+    .unwrap();
+  let mut buf = Vec::new();
+  stream.read_to_end(&mut buf).await.unwrap();
+  let res = String::from_utf8(buf).unwrap();
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("unix"), "uds has no client ip, got: {}", res);
+
+  // Graceful shutdown works for UDS servers too (abort = immediate here;
+  // the run_with_shutdown path is covered by the TCP tests).
+  server_task.abort();
+
+  std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+async fn run_tcp_listener_serves_prebound_listener() {
+  let mut app = Router::new();
+  app.get("/", |_| async { "prebound" });
+
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let server = desirable::Server::try_bind(&addr.to_string()).unwrap();
+
+  let server_task = tokio::spawn(async move {
+    server.run_tcp_listener(app, listener).await.unwrap();
+  });
+
+  for _ in 0..100 {
+    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+
+  let res = raw_request(addr, &get_request("/")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("prebound"), "got: {}", res);
+
+  server_task.abort();
+}
+
+#[tokio::test]
+async fn multiple_listeners_share_shutdown() {
+  async fn make_server() -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+  ) {
+    let mut app = Router::new();
+    app.get("/", |_| async { "ok" });
+
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let server = desirable::Server::try_bind(&addr.to_string()).unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+      server
+        .run_with_shutdown(app, async move {
+          let _ = rx.await;
+        })
+        .await
+        .unwrap();
+    });
+    (addr, tx, task)
+  }
+
+  let (addr_a, tx_a, task_a) = make_server().await;
+  let (addr_b, tx_b, task_b) = make_server().await;
+
+  for target in [addr_a, addr_b] {
+    for _ in 0..100 {
+      if tokio::net::TcpStream::connect(target).await.is_ok() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+  }
+
+  // Both serve independently.
+  assert!(
+    raw_request(addr_a, &get_request("/"))
+      .await
+      .starts_with("HTTP/1.1 200")
+  );
+  assert!(
+    raw_request(addr_b, &get_request("/"))
+      .await
+      .starts_with("HTTP/1.1 200")
+  );
+
+  // Shutting down server A does NOT affect server B.
+  tx_a.send(()).unwrap();
+  let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task_a).await;
+  let res = std::panic::AssertUnwindSafe(raw_request(addr_b, &get_request("/")).await);
+  assert!(
+    res.starts_with("HTTP/1.1 200"),
+    "server B must keep serving"
+  );
+
+  // Then shutdown B.
+  tx_b.send(()).unwrap();
+  let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task_b).await;
+}
+
+#[tokio::test]
+async fn header_read_timeout_closes_slow_clients() {
+  use std::time::Duration;
+
+  let mut app = Router::new();
+  app.get("/", |_| async { "ok" });
+
+  let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = probe.local_addr().unwrap();
+  drop(probe);
+
+  let server = desirable::Server::try_bind(&addr.to_string())
+    .unwrap()
+    .http1_header_read_timeout(Duration::from_millis(100));
+  let server_task = tokio::spawn(async move {
+    server
+      .run_with_shutdown(app, std::future::pending::<()>())
+      .await
+      .unwrap();
+  });
+
+  for _ in 0..100 {
+    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+
+  // Send a partial request line, then go quiet: the server must close the
+  // connection after the header read timeout instead of waiting forever.
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+  let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+  stream.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
+  let started = std::time::Instant::now();
+  let mut buf = Vec::new();
+  let read = stream.read_to_end(&mut buf).await;
+
+  assert!(read.is_ok(), "connection should close cleanly");
+  let elapsed = started.elapsed();
+  assert!(
+    elapsed >= Duration::from_millis(50) && elapsed < Duration::from_secs(3),
+    "close should happen after ~100ms, took {:?}",
+    elapsed
+  );
+  assert!(
+    buf.is_empty(),
+    "no response expected, got {:?}",
+    String::from_utf8_lossy(&buf)
+  );
+
+  server_task.abort();
 }
