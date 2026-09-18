@@ -81,7 +81,7 @@ pub async fn dispatch(
 ) -> Result<HyperResponse> {
   let mut req = req;
   if let Some(addr) = &remote_addr {
-    let client_ip = resolve_client_ip(addr.ip(), &req, &trusted_proxies);
+    let client_ip = resolve_client_ip(addr.ip(), req.headers(), &trusted_proxies);
     req
       .extensions_mut()
       .insert(crate::request::ClientIp(client_ip));
@@ -95,16 +95,19 @@ pub async fn dispatch(
 /// address when absent, malformed, or entirely trusted.
 fn resolve_client_ip(
   peer: std::net::IpAddr,
-  req: &HyperRequest,
+  headers: &hyper::HeaderMap,
   trusted: &[IpNet],
 ) -> std::net::IpAddr {
   use std::net::IpAddr;
 
-  let Some(xff) = req
-    .headers()
-    .get("x-forwarded-for")
-    .and_then(|v| v.to_str().ok())
-  else {
+  // The X-Forwarded-For chain is only honored when the immediate peer is a
+  // trusted proxy. A direct client can set the header to anything, so
+  // without this gate the client IP is fully attacker-controlled.
+  if !trusted.iter().any(|net| net.contains(&peer)) {
+    return peer;
+  }
+
+  let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) else {
     return peer;
   };
   let mut client = peer;
@@ -257,14 +260,14 @@ impl Server {
 
   /// Declares proxy networks trusted to set `X-Forwarded-For`.
   ///
-  /// Accepts CIDR strings and bare IPs. When the immediate peer is inside a
-  /// trusted network, the client IP is resolved by walking
-  /// `X-Forwarded-For` from right to left and taking the first address that
-  /// is NOT in a trusted network; the result is exposed via
-  /// [`Request::client_ip`](crate::Request::client_ip) and used by the
-  /// [`RateLimit`](crate::RateLimit) middleware.
+  /// Accepts CIDR strings and bare IPs. The `X-Forwarded-For` chain is
+  /// honored ONLY when the immediate peer is inside a trusted network; the
+  /// resolved client IP (first non-trusted address from the right) is
+  /// exposed via [`Request::client_ip`](crate::Request::client_ip) and used
+  /// by the [`RateLimit`](crate::RateLimit) middleware.
   ///
-  /// Off by default: without trusted proxies the header is never trusted.
+  /// Off by default: without trusted proxies the header is never trusted,
+  /// and spoofed values cannot influence `client_ip()` or rate limiting.
   ///
   /// # Panics
   ///
@@ -677,6 +680,81 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+  use super::{Server, parse_trusted_proxies};
+  use std::net::IpAddr;
+
+  fn trusted() -> Vec<IpNet> {
+    parse_trusted_proxies(["10.0.0.0/8", "127.0.0.1"])
+  }
+
+  fn request_with_xff(value: &str) -> hyper::HeaderMap {
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert("x-forwarded-for", value.parse().unwrap());
+    headers
+  }
+
+  #[test]
+  fn test_client_ip_direct_peer_without_xff() {
+    let peer: IpAddr = "203.0.113.5".parse().unwrap();
+    let headers = hyper::HeaderMap::new();
+    assert_eq!(resolve_client_ip(peer, &headers, &trusted()), peer);
+  }
+
+  #[test]
+  fn test_client_ip_untrusted_peer_xff_is_ignored() {
+    // Peer is NOT in trusted networks: spoofed XFF must be ignored.
+    let peer: IpAddr = "203.0.113.5".parse().unwrap();
+    let req = request_with_xff("9.9.9.9");
+    assert_eq!(resolve_client_ip(peer, &req, &trusted()), peer);
+  }
+
+  #[test]
+  fn test_client_ip_trusted_peer_resolves_xff() {
+    // Peer 127.0.0.1 is trusted: rightmost untrusted entry wins.
+    let peer: IpAddr = "127.0.0.1".parse().unwrap();
+    let req = request_with_xff("203.0.113.7, 10.0.0.1");
+    assert_eq!(
+      resolve_client_ip(peer, &req, &trusted()),
+      "203.0.113.7".parse::<IpAddr>().unwrap()
+    );
+  }
+
+  #[test]
+  fn test_client_ip_chain_all_trusted_falls_to_leftmost() {
+    let peer: IpAddr = "127.0.0.1".parse().unwrap();
+    let req = request_with_xff("10.0.0.1, 10.0.0.2");
+    assert_eq!(
+      resolve_client_ip(peer, &req, &trusted()),
+      "10.0.0.1".parse::<IpAddr>().unwrap()
+    );
+  }
+
+  #[test]
+  fn test_client_ip_untrusted_entry_wins_over_malformed_left() {
+    // Rightmost entry is untrusted -> it is the client; the malformed
+    // entry further left is never reached.
+    let peer: IpAddr = "127.0.0.1".parse().unwrap();
+    let req = request_with_xff("not-an-ip, 203.0.113.7");
+    assert_eq!(
+      resolve_client_ip(peer, &req, &trusted()),
+      "203.0.113.7".parse::<IpAddr>().unwrap()
+    );
+  }
+
+  #[test]
+  fn test_client_ip_malformed_rightmost_falls_back_to_peer() {
+    let peer: IpAddr = "127.0.0.1".parse().unwrap();
+    let req = request_with_xff("garbage");
+    assert_eq!(resolve_client_ip(peer, &req, &trusted()), peer);
+  }
+
+  #[test]
+  fn test_client_ip_empty_trusted_list_never_trusts() {
+    let peer: IpAddr = "127.0.0.1".parse().unwrap();
+    let req = request_with_xff("9.9.9.9");
+    assert_eq!(resolve_client_ip(peer, &req, &[]), peer);
+  }
+
   use super::*;
 
   #[test]

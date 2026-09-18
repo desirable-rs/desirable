@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.1] - 2026-09-18
+
+### Fixed
+
+- **`X-Forwarded-For` spoofing** (security): `client_ip()` honored the
+  forwarded chain for EVERY client — the immediate peer was never checked
+  against `trusted_proxies`, so any direct client could rotate fake IPs and
+  bypass `RateLimit` entirely. The chain is now honored only when the peer
+  is inside a trusted network (matching the documented behavior).
+- **Session cookies never expired server-side**: `max_age_secs` was only a
+  browser cookie attribute. `read_session` now rejects cookies older than
+  the configured max age (`SessionError::Expired`); `max_age_secs = None`
+  still means no server-side expiry.
+- **Static files followed symlinks**: planted symlinks (uploaded files,
+  extracted archives) could serve content from outside the base directory.
+  `ServeDir` now rejects both file and directory symlinks via full
+  canonicalization against the base directory.
+- **RateLimit bucket flush**: a full bucket map (65,536 clients) triggered a
+  global `clear()` on every request, letting an attacker disable rate
+  limiting for everyone. Idle buckets are now evicted first, then the least
+  recently active client, keeping a hard cap on memory without resetting
+  legitimate clients.
+
+### Security
+
+- Documented the BREACH consideration for the `Compression` middleware.
+
+---
+
 ## [2.5.0] - 2026-09-18
 
 ### Added
@@ -467,6 +496,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.5.1]: https://github.com/desirable-rs/desirable/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/desirable-rs/desirable/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/desirable-rs/desirable/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/desirable-rs/desirable/compare/v2.2.0...v2.3.0

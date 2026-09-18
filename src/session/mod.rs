@@ -763,6 +763,40 @@ mod tests {
   }
 
   #[test]
+  fn test_session_expiry_enforced_server_side() {
+    let key = b"this-is-a-32-byte-secret-key-!!!!";
+    // max_age_secs(-1): every session is already expired.
+    let expired_manager = SessionManager::new(SessionConfig::new(key).max_age_secs(-1));
+    let mut session = expired_manager.create_session();
+    session.insert("user_id", 1).unwrap();
+    let cookie = expired_manager.write_session(&session);
+
+    let err = expired_manager.read_session(&cookie).unwrap_err();
+    assert!(matches!(
+      err,
+      crate::error::Error::Session(crate::session::SessionError::Expired)
+    ));
+
+    // A non-expired session still verifies.
+    let live_manager = SessionManager::new(SessionConfig::new(key).max_age_secs(3600));
+    let mut live = live_manager.create_session();
+    live.insert("user_id", 1).unwrap();
+    let cookie = live_manager.write_session(&live);
+    let loaded = live_manager.read_session(&cookie).unwrap().unwrap();
+    let user_id: Option<i32> = loaded.get("user_id").unwrap();
+    assert_eq!(user_id, Some(1));
+  }
+
+  #[test]
+  fn test_regenerate_id_changes_identity() {
+    let manager = SessionManager::with_random_key();
+    let mut session = manager.create_session();
+    let old = session.id().to_string();
+    session.regenerate_id();
+    assert_ne!(session.id(), old);
+  }
+
+  #[test]
   fn test_cookie_value_with_base64_padding_survives() {
     // Regression test: cookie values are base64 and usually end in '='
     // padding. The old `split('=').nth(1)` lookup truncated at the first

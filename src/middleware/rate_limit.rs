@@ -3,12 +3,14 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-/// Default cap on the number of tracked client buckets. When exceeded, the
-/// map is cleared — a simple safeguard against memory exhaustion from
-/// spoofed-source floods before eviction logic becomes warranted.
+/// Default cap on the number of tracked client buckets. When exceeded,
+/// idle buckets are evicted first, then the least-recently-active client.
 const DEFAULT_MAX_BUCKETS: usize = 65_536;
+
+/// A bucket idle longer than this is evicted when the map is at capacity.
+const BUCKET_IDLE_SECS: u64 = 60;
 
 /// A per-client token bucket.
 #[derive(Debug)]
@@ -67,11 +69,31 @@ impl RateLimit {
   /// Attempts to take one token for `ip`. Returns `false` when the client is
   /// over the limit.
   fn try_acquire(&self, ip: &IpAddr) -> bool {
+    let now = Instant::now();
     let mut state = self.state.lock().expect("rate limit mutex poisoned");
     if state.len() >= self.max_buckets {
-      state.clear();
+      // At capacity: first drop idle buckets (clients not seen within the
+      // eviction window — a global clear() here would let an attacker flush
+      // everyone by pinning the map). If still full, evict the single
+      // least-recently-active client, keeping a hard cap on memory.
+      let idle_cutoff = Duration::from_secs(BUCKET_IDLE_SECS);
+      let stale: Vec<IpAddr> = state
+        .iter()
+        .filter(|(_, bucket)| now.duration_since(bucket.last_refill) > idle_cutoff)
+        .map(|(ip, _)| *ip)
+        .collect();
+      for ip in stale {
+        state.remove(&ip);
+      }
+      if state.len() >= self.max_buckets
+        && let Some(oldest) = state
+          .iter()
+          .min_by_key(|(_, bucket)| bucket.last_refill)
+          .map(|(ip, _)| *ip)
+      {
+        state.remove(&oldest);
+      }
     }
-    let now = Instant::now();
     let bucket = state.entry(*ip).or_insert(Bucket {
       tokens: self.capacity,
       last_refill: now,
@@ -157,13 +179,16 @@ mod tests {
   }
 
   #[test]
-  fn test_bucket_map_clears_at_capacity() {
+  fn test_bucket_map_caps_at_capacity_with_lru_eviction() {
     let mut limiter = RateLimit::per_second(1);
     limiter.max_buckets = 8;
     for i in 0..64u32 {
       let ip: IpAddr = format!("10.0.0.{i}").parse().unwrap();
       let _ = limiter.try_acquire(&ip);
     }
+    // Hard cap enforced by LRU eviction; the newest client survives.
     assert_eq!(limiter.state.lock().unwrap().len(), 8);
+    let last: IpAddr = "10.0.0.63".parse().unwrap();
+    assert!(limiter.state.lock().unwrap().contains_key(&last));
   }
 }

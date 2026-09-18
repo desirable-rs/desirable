@@ -344,7 +344,11 @@ async fn serve_file_with_cache(req: &Request, path: &Path, options: &ServeOption
   // Precompressed siblings: prefer brotli, then gzip. The Content-Type and
   // validators stay those of the plain file (same logical resource).
   let mut encoding: Option<&'static str> = None;
-  if options.precompressed {
+  let path_is_dir = tokio::fs::metadata(path)
+    .await
+    .map(|m| m.is_dir())
+    .unwrap_or(false);
+  if options.precompressed && !path_is_dir {
     for (ext, token) in [(".br", "br"), (".gz", "gzip")] {
       if !accepts_encoding(req, token) {
         continue;
@@ -499,10 +503,29 @@ fn is_not_modified(req: &Request, etag: &str, modified: SystemTime) -> bool {
 /// A regular file costs a single `open` + `fstat`; the extra open happens
 /// only for directory hits.
 async fn open_for_serve(path: &Path) -> std::io::Result<(tokio::fs::File, std::fs::Metadata)> {
+  // Reject symlinks at the final component: uploaded or planted links must
+  // not serve files from outside the base directory. (lstat does not follow
+  // the last component; the handle-based fstat below still gives the real
+  // file's metadata afterwards.)
+  let meta = tokio::fs::symlink_metadata(path).await?;
+  if meta.file_type().is_symlink() {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::NotFound,
+      "symlinks are not served",
+    ));
+  }
   let file = tokio::fs::File::open(path).await?;
   let meta = file.metadata().await?;
   if meta.is_dir() {
-    let file = tokio::fs::File::open(path.join("index.html")).await?;
+    let index = path.join("index.html");
+    let meta = tokio::fs::symlink_metadata(&index).await?;
+    if meta.file_type().is_symlink() {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "symlinks are not served",
+      ));
+    }
+    let file = tokio::fs::File::open(&index).await?;
     let meta = file.metadata().await?;
     Ok((file, meta))
   } else {
@@ -626,6 +649,21 @@ impl Endpoint for ServeDir {
         ));
       }
     };
+
+    // Symlink hardening: fully resolve the path (following any directory or
+    // file symlinks) and require it to stay inside the canonical base
+    // directory. Catches planted directory symlinks that the final-
+    // component lstat check cannot see.
+    if let Ok(actual) = resolved.canonicalize() {
+      let base = self.dir.canonicalize().unwrap_or_else(|_| self.dir.clone());
+      if !actual.starts_with(&base) {
+        return Ok(Response::with_status_code(
+          hyper::StatusCode::NOT_FOUND,
+          "not found".to_string(),
+        ));
+      }
+    }
+
     serve_file_with_cache(&req, &resolved, &self.options).await
   }
 }

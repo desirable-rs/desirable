@@ -5,6 +5,7 @@ use super::error::SessionError;
 use super::{Session, SessionData};
 use crate::Result;
 use base64::Engine as _;
+use chrono::Utc;
 use hmac::{Hmac, Mac};
 use hyper::http;
 use sha2::Sha256;
@@ -227,6 +228,18 @@ impl SessionManager {
         .map_err(|_| SessionError::SignatureMismatch)?;
       let session_data: SessionData =
         serde_json::from_slice(data_bytes).map_err(|_| SessionError::InvalidCookie)?;
+
+      // Server-side expiry: the cookie Max-Age only makes the browser drop
+      // the cookie; without this check an exfiltrated cookie would be
+      // replayable forever. `max_age_secs = None` (browser-session cookie)
+      // means no server-side expiry.
+      if let Some(max_age) = self.config.max_age_secs {
+        let age = Utc::now().signed_duration_since(session_data.created);
+        if age > chrono::Duration::seconds(max_age) {
+          return Err(SessionError::Expired.into());
+        }
+      }
+
       Ok(Some(Session::new(session_data)))
     } else {
       Err(SessionError::InvalidCookie.into())

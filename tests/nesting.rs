@@ -1189,3 +1189,43 @@ async fn tls_serves_http1_and_alpn_negotiates_h2() {
 
   server_task.abort();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_static_files_are_not_served() {
+  let dir = std::env::temp_dir().join(format!("desirable-symlink-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  std::fs::write(dir.join("ok.txt"), b"harmless").unwrap();
+
+  let secret = std::env::temp_dir().join(format!("desirable-secret-{}.txt", std::process::id()));
+  std::fs::write(&secret, b"top secret").unwrap();
+
+  // Plant symlinks: one file link, one directory link with a file inside.
+  std::os::unix::fs::symlink(&secret, dir.join("link.txt")).unwrap();
+  let outside_dir = std::env::temp_dir().join(format!("desirable-outside-{}", std::process::id()));
+  std::fs::create_dir_all(&outside_dir).unwrap();
+  std::fs::write(outside_dir.join("inner.txt"), b"inner secret").unwrap();
+  std::os::unix::fs::symlink(&outside_dir, dir.join("subdir")).unwrap();
+
+  let mut app = Router::new();
+  app.get("/static/*file", desirable::ServeDir::new(dir.clone()));
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Regular file serves fine.
+  let res = raw_request(addr, &get_request("/static/ok.txt")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.ends_with("harmless"), "got: {}", res);
+
+  // File symlink: 404.
+  let res = raw_request(addr, &get_request("/static/link.txt")).await;
+  assert!(res.starts_with("HTTP/1.1 404"), "got: {}", res);
+
+  // Directory symlink: 404.
+  let res = raw_request(addr, &get_request("/static/subdir/inner.txt")).await;
+  assert!(res.starts_with("HTTP/1.1 404"), "got: {}", res);
+
+  std::fs::remove_dir_all(&dir).ok();
+  std::fs::remove_file(&secret).ok();
+  std::fs::remove_dir_all(&outside_dir).ok();
+}
