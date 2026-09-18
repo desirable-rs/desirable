@@ -60,7 +60,7 @@ impl Deref for SessionHandle {
 /// app.with(SessionLayer::new(manager));
 /// app.post("/login", |req: Request| async move {
 ///   req.session().lock().insert("user_id", 42)?;
-///   Ok(desirable::Response::text("logged in"))
+///   Ok(desirable::Response::builder().text("logged in"))
 /// });
 /// ```
 #[derive(Clone, Debug)]

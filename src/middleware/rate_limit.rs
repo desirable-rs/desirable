@@ -27,8 +27,10 @@ struct Bucket {
 /// `Retry-After: 1` header.
 ///
 /// The state is process-local: it does not survive restarts and is not
-/// shared between instances. Behind a proxy, consider keying on
-/// `X-Forwarded-For` (not done here to avoid trusting spoofable headers).
+/// shared between instances. Buckets are keyed on
+/// [`Request::client_ip`](crate::Request::client_ip), which honors
+/// `X-Forwarded-For` only from proxies declared via
+/// [`Server::trusted_proxies`](crate::Server::trusted_proxies).
 ///
 /// # Example
 ///

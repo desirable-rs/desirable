@@ -19,7 +19,7 @@ use std::borrow::Cow;
 /// - `()` - Empty response with status 200
 /// - `&'static str` - Text response
 /// - `String` - Text response
-/// - [`Error`] - Error response with status 500
+/// - [`Error`] - rendered via [`crate::error::render_error`] (status varies by variant: 400/413/500)
 /// - `Bytes` / `BytesMut` - Raw bytes with octet-stream content type
 /// - `(StatusCode, &str)` / `(StatusCode, String)` - Status with body
 /// - `(u16, &str)` / `(u16, String)` - Status code with body

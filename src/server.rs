@@ -246,7 +246,8 @@ impl Server {
   /// Sets the maximum time to wait for a client to send complete request
   /// headers.
   ///
-  /// Protects against slow-loris style clients. Default: disabled.
+  /// Protects against slow-loris style clients. Default: 30 seconds
+  /// (hyper's built-in default); this setter customizes it.
   #[must_use]
   pub fn http1_header_read_timeout(mut self, timeout: Duration) -> Self {
     self.header_read_timeout = Some(timeout);
