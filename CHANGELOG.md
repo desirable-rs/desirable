@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.0] - 2026-09-18
+
+### Added
+
+- **TLS support** (feature `tls`): `Server::tls_config(Arc<ServerConfig>)`
+  enables TLS on the TCP listener. Helper
+  `tls::server_config_from_pem(certs_pem, key_pem)` builds a rustls config
+  from PEM bytes with ALPN pre-set to negotiate HTTP/2 and HTTP/1.1
+  (ring provider). WSS is expected to terminate at a reverse proxy.
+- **HTTP/2 over ALPN**: the auto connection builder now serves h2 when the
+  TLS handshake negotiates it — zero application changes (the 2.0 `Body`
+  already satisfies h2). Both the HTTP/1.1 and HTTP/2 paths receive the
+  configured timers. Note: WebSocket upgrade is served on HTTP/1.1 only
+  (h2 requires the extended-CONNECT flow, future work).
+- Test fixtures: self-signed CA + server certificate under `tests/certs/`.
+
+### Dependencies
+
+- `tls` feature adds `tokio-rustls` 0.26 (ring provider, no default
+  features) and `rustls-pemfile` 2 — the first genuinely new dependency
+  subtree, isolated behind the feature so default builds are unchanged.
+
+---
+
 ## [2.4.0] - 2026-09-18
 
 ### Added
@@ -443,6 +467,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.5.0]: https://github.com/desirable-rs/desirable/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/desirable-rs/desirable/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/desirable-rs/desirable/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/desirable-rs/desirable/compare/v2.1.0...v2.2.0

@@ -151,6 +151,9 @@ pub struct Server {
   trusted_proxies: Vec<IpNet>,
   /// Maximum time to wait for the client to send complete request headers
   header_read_timeout: Option<Duration>,
+  /// TLS configuration (feature `tls`)
+  #[cfg(feature = "tls")]
+  tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 }
 
 impl Server {
@@ -180,6 +183,8 @@ impl Server {
       drain_timeout: DEFAULT_DRAIN_TIMEOUT,
       trusted_proxies: Vec::new(),
       header_read_timeout: None,
+      #[cfg(feature = "tls")]
+      tls: None,
     })
   }
 
@@ -194,6 +199,8 @@ impl Server {
       drain_timeout: DEFAULT_DRAIN_TIMEOUT,
       trusted_proxies: Vec::new(),
       header_read_timeout: None,
+      #[cfg(feature = "tls")]
+      tls: None,
     }
   }
 
@@ -223,6 +230,28 @@ impl Server {
   #[must_use]
   pub fn http1_header_read_timeout(mut self, timeout: Duration) -> Self {
     self.header_read_timeout = Some(timeout);
+    self
+  }
+
+  /// Returns the TLS acceptor when TLS is configured (feature `tls`).
+  #[cfg(feature = "tls")]
+  fn tls_acceptor(&self) -> Option<tokio_rustls::TlsAcceptor> {
+    self
+      .tls
+      .as_ref()
+      .map(|config| tokio_rustls::TlsAcceptor::from(Arc::clone(config)))
+  }
+
+  /// Enables TLS on the TCP listener with the given rustls configuration.
+  ///
+  /// Set `alpn_protocols` to `["h2", "http/1.1"]` (as
+  /// [`tls::server_config_from_pem`](crate::tls::server_config_from_pem)
+  /// does) to negotiate HTTP/2 alongside HTTP/1.1. Unix domain socket
+  /// listeners are unaffected.
+  #[cfg(feature = "tls")]
+  #[must_use]
+  pub fn tls_config(mut self, config: Arc<tokio_rustls::rustls::ServerConfig>) -> Self {
+    self.tls = Some(config);
     self
   }
 
@@ -370,7 +399,7 @@ trait Listener: Send {
   fn describe(&self) -> String;
   fn accept(
     &self,
-  ) -> impl Future<Output = std::io::Result<(AnyStream, Option<Arc<SocketAddr>>)>> + Send;
+  ) -> impl Future<Output = std::io::Result<(AcceptedIo, Option<Arc<SocketAddr>>)>> + Send;
 }
 
 impl Listener for TcpListener {
@@ -383,7 +412,7 @@ impl Listener for TcpListener {
 
   fn accept(
     &self,
-  ) -> impl Future<Output = std::io::Result<(AnyStream, Option<Arc<SocketAddr>>)>> + Send {
+  ) -> impl Future<Output = std::io::Result<(AcceptedIo, Option<Arc<SocketAddr>>)>> + Send {
     let fut = TcpListener::accept(self);
     async move {
       let (stream, addr) = fut.await?;
@@ -392,7 +421,7 @@ impl Listener for TcpListener {
         debug!("Failed to set TCP_NODELAY: {}", err);
       }
       let remote_addr = Some(Arc::new(addr));
-      Ok((AnyStream::Tcp(TokioIo::new(stream)), remote_addr))
+      Ok((AcceptedIo::Tcp(stream), remote_addr))
     }
   }
 }
@@ -414,11 +443,11 @@ impl Listener for tokio::net::UnixListener {
 
   fn accept(
     &self,
-  ) -> impl Future<Output = std::io::Result<(AnyStream, Option<Arc<SocketAddr>>)>> + Send {
+  ) -> impl Future<Output = std::io::Result<(AcceptedIo, Option<Arc<SocketAddr>>)>> + Send {
     let fut = tokio::net::UnixListener::accept(self);
     async move {
       let (stream, _addr) = fut.await?;
-      Ok((AnyStream::Unix(TokioIo::new(stream)), None))
+      Ok((AcceptedIo::Unix(stream), None))
     }
   }
 }
@@ -430,54 +459,80 @@ async fn bind_unix(path: &PathBuf) -> std::io::Result<tokio::net::UnixListener> 
   tokio::net::UnixListener::bind(path)
 }
 
-/// A connection IO from any listener kind.
+/// A freshly accepted connection (pre-TLS handshake).
+enum AcceptedIo {
+  Tcp(tokio::net::TcpStream),
+  #[cfg(unix)]
+  Unix(tokio::net::UnixStream),
+}
+
+/// A connection IO from any listener kind, post-TLS.
 enum AnyStream {
   Tcp(TokioIo<tokio::net::TcpStream>),
   #[cfg(unix)]
   Unix(TokioIo<tokio::net::UnixStream>),
+  #[cfg(feature = "tls")]
+  TlsTcp(TokioIo<Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>),
 }
 
 impl hyper::rt::Read for AnyStream {
   fn poll_read(
-    mut self: Pin<&mut Self>,
+    self: Pin<&mut Self>,
     cx: &mut Context<'_>,
     buf: hyper::rt::ReadBufCursor<'_>,
   ) -> Poll<std::io::Result<()>> {
-    match &mut *self {
+    match self.get_mut() {
       AnyStream::Tcp(io) => Pin::new(io).poll_read(cx, buf),
       #[cfg(unix)]
       AnyStream::Unix(io) => Pin::new(io).poll_read(cx, buf),
+      #[cfg(feature = "tls")]
+      AnyStream::TlsTcp(io) => Pin::new(io).poll_read(cx, buf),
     }
   }
 }
 
 impl hyper::rt::Write for AnyStream {
   fn poll_write(
-    mut self: Pin<&mut Self>,
+    self: Pin<&mut Self>,
     cx: &mut Context<'_>,
     buf: &[u8],
   ) -> Poll<std::io::Result<usize>> {
-    match &mut *self {
+    match self.get_mut() {
       AnyStream::Tcp(io) => Pin::new(io).poll_write(cx, buf),
       #[cfg(unix)]
       AnyStream::Unix(io) => Pin::new(io).poll_write(cx, buf),
+      #[cfg(feature = "tls")]
+      AnyStream::TlsTcp(io) => Pin::new(io).poll_write(cx, buf),
     }
   }
 
-  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-    match &mut *self {
+  fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    match self.get_mut() {
       AnyStream::Tcp(io) => Pin::new(io).poll_flush(cx),
       #[cfg(unix)]
       AnyStream::Unix(io) => Pin::new(io).poll_flush(cx),
+      #[cfg(feature = "tls")]
+      AnyStream::TlsTcp(io) => Pin::new(io).poll_flush(cx),
     }
   }
 
-  fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-    match &mut *self {
+  fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    match self.get_mut() {
       AnyStream::Tcp(io) => Pin::new(io).poll_shutdown(cx),
       #[cfg(unix)]
       AnyStream::Unix(io) => Pin::new(io).poll_shutdown(cx),
+      #[cfg(feature = "tls")]
+      AnyStream::TlsTcp(io) => Pin::new(io).poll_shutdown(cx),
     }
+  }
+}
+
+/// Wraps a plain accepted connection into the served stream form.
+fn accepted_to_served(io: AcceptedIo) -> AnyStream {
+  match io {
+    AcceptedIo::Tcp(stream) => AnyStream::Tcp(TokioIo::new(stream)),
+    #[cfg(unix)]
+    AcceptedIo::Unix(stream) => AnyStream::Unix(TokioIo::new(stream)),
   }
 }
 
@@ -514,6 +569,9 @@ async fn accept_loop<L: Listener>(
   trusted: Arc<Vec<IpNet>>,
   server: &Server,
 ) -> Result<()> {
+  #[cfg(feature = "tls")]
+  let tls_acceptor = server.tls_acceptor();
+
   loop {
     tokio::select! {
       accepted = listener.accept() => {
@@ -522,17 +580,49 @@ async fn accept_loop<L: Listener>(
         let trusted = Arc::clone(&trusted);
         let shutdown = shutdown.clone();
         let header_read_timeout = server.header_read_timeout;
+        #[cfg(feature = "tls")]
+        let tls_acceptor = tls_acceptor.clone();
         tracker.spawn(async move {
-          // auto builder: HTTP/1.1 today, and supports the WebSocket
-          // upgrade handshake (http1's serve_connection does not).
+          // auto builder: HTTP/1.1 and ALPN-negotiated HTTP/2 (the h2 client
+          // preface is auto-detected), plus WebSocket upgrade support.
           let mut builder = hyper_util::server::conn::auto::Builder::new(
             hyper_util::rt::TokioExecutor::new(),
           );
-          let h1 = &mut builder.http1();
-          h1.timer(TokioTimer::new());
-          if let Some(d) = header_read_timeout {
-            h1.header_read_timeout(Some(d));
+          {
+            let h1 = &mut builder.http1();
+            h1.timer(TokioTimer::new());
+            if let Some(d) = header_read_timeout {
+              h1.header_read_timeout(Some(d));
+            }
           }
+          {
+            let h2 = &mut builder.http2();
+            h2.timer(TokioTimer::new());
+          }
+          // TLS handshake (feature `tls`): failures just drop the connection.
+          #[cfg(feature = "tls")]
+          let io = match (tls_acceptor, io) {
+            (Some(acceptor), AcceptedIo::Tcp(tcp)) => {
+              match acceptor.accept(tcp).await {
+                Ok(tls_stream) => {
+                  debug!(
+                    "TLS established, alpn: {:?}",
+                    tls_stream.get_ref().1.alpn_protocol()
+                  );
+                  AnyStream::TlsTcp(TokioIo::new(Box::new(tls_stream)))
+                }
+                Err(err) => {
+                  debug!("TLS handshake failed: {}", err);
+                  return;
+                }
+              }
+            }
+            (None, other) => accepted_to_served(other),
+            #[cfg(unix)]
+            (_, other @ AcceptedIo::Unix(_)) => accepted_to_served(other),
+          };
+          #[cfg(not(feature = "tls"))]
+          let io = accepted_to_served(io);
           let conn = builder.serve_connection_with_upgrades(
             io,
             Svc {

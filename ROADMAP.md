@@ -26,6 +26,7 @@ arrives.
 | 2.2.0 | Static files & proxy environments | Single-range requests (206/416 + If-Range), strong SHA-256 ETag option with caching, `trusted_proxies` + `Request::client_ip()` (rightmost-untrusted X-Forwarded-For), RateLimit keyed on resolved client IP |
 | 2.3.0 | WebSocket | `Router::websocket` + `WebSocketConn`/`WebSocketUpgrade` behind the `websocket` feature (tokio-tungstenite); hyper `Upgraded` bridged to tokio IO for tungstenite |
 | 2.4.0 | Server capabilities | Unix domain socket servers (`bind_unix`), `run_tcp_listener` for pre-bound listeners, multi-listener deployments with shared shutdown, `http1_header_read_timeout` slow-loris protection |
+| 2.5.0 | TLS + HTTP/2 | `tls` feature: rustls acceptor with ALPN h2/h1 negotiation (e2e-verified h2 over TLS), PEM config helper; `tls` dependency subtree isolated behind the feature |
 
 ## Roadmap: 2.x → 3.0
 
@@ -73,7 +74,7 @@ changes: MSRV/edition, deprecated removals, and the extractor decision.
 - **`run_listener`** — accept any listener (test-friendly, fd-passing
   friendly).
 
-### v2.5 — TLS + HTTP/2 (features `tls`, `http2`)
+### v2.5 — TLS + HTTP/2 (feature `tls`) ✅ shipped
 
 - **rustls** acceptor with a minimal certificate surface.
 - Switch to hyper-util's `auto` connection builder: **ALPN negotiates

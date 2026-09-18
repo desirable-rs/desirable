@@ -113,6 +113,16 @@ app.websocket("/ws", |mut conn: WebSocketConn| async move {
 });
 ```
 
+**TLS + HTTP/2** (feature `tls`) — rustls-based, ALPN negotiates h2/h1:
+
+```rust,ignore
+let config = desirable::tls::server_config_from_pem(&cert_pem, &key_pem)?;
+desirable::Server::try_bind("0.0.0.0:443")?
+    .tls_config(Arc::new(config))
+    .run(app)
+    .await?;
+```
+
 **Sessions** — one line to enable; handlers mutate `req.session()` and the
 `Set-Cookie` header is emitted automatically, only when the session changed
 (`session.destroy()` emits a deletion cookie for logout).

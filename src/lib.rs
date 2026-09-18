@@ -42,6 +42,8 @@ pub mod response;
 pub mod router;
 pub mod server;
 pub mod session;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod types;
 #[cfg(feature = "websocket")]
 pub mod websocket;
@@ -62,6 +64,8 @@ pub use response::Response;
 pub use router::Router;
 pub use server::Server;
 pub use session::{Session, SessionConfig, SessionError, SessionManager};
+#[cfg(feature = "tls")]
+pub use tls::server_config_from_pem;
 #[cfg(feature = "websocket")]
 pub use websocket::{WebSocketConn, WebSocketUpgrade};
 

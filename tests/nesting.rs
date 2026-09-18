@@ -1106,3 +1106,86 @@ async fn header_read_timeout_closes_slow_clients() {
 
   server_task.abort();
 }
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn tls_serves_http1_and_alpn_negotiates_h2() {
+  use desirable::tls::server_config_from_pem;
+  use hyper::Request;
+  use hyper_util::rt::{TokioExecutor, TokioIo};
+  use std::sync::Arc;
+
+  let mut app = Router::new();
+  app.get("/", |_| async { "hello over tls" });
+
+  // Load the committed self-signed test certificate chain (leaf + CA).
+  let cert_pem = std::fs::read("tests/certs/server-cert.pem").unwrap();
+  let key_pem = std::fs::read("tests/certs/server-key.pem").unwrap();
+  let config = Arc::new(server_config_from_pem(&cert_pem, &key_pem).unwrap());
+
+  let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = probe.local_addr().unwrap();
+  drop(probe);
+
+  let server = desirable::Server::try_bind(&addr.to_string())
+    .unwrap()
+    .tls_config(config);
+  let server_task = tokio::spawn(async move {
+    server
+      .run_with_shutdown(app, std::future::pending::<()>())
+      .await
+      .unwrap();
+  });
+  for _ in 0..100 {
+    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+
+  // Client TLS setup: trust the test CA, request ALPN h2.
+  let cert_pem = std::fs::read("tests/certs/ca-cert.pem").unwrap();
+  let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+  for cert in rustls_pemfile::certs(&mut cert_pem.as_slice()) {
+    roots.add(cert.unwrap()).unwrap();
+  }
+  let mut client_config = tokio_rustls::rustls::ClientConfig::builder()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+  client_config.alpn_protocols = vec![b"h2".to_vec()];
+
+  let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+  let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+  let tls_stream = connector
+    .connect("localhost".try_into().unwrap(), tcp)
+    .await
+    .unwrap();
+  // ALPN negotiated h2 with the server.
+  assert_eq!(
+    tls_stream.get_ref().1.alpn_protocol(),
+    Some(b"h2".as_slice())
+  );
+
+  // Drive an HTTP/2 request over the negotiated connection.
+  let (mut sender, conn) =
+    hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls_stream))
+      .await
+      .unwrap();
+  tokio::spawn(async move {
+    let _ = conn.await;
+  });
+
+  let request = Request::builder()
+    .uri("https://localhost/")
+    .body(http_body_util::Empty::<Bytes>::new())
+    .unwrap();
+  let response = sender.send_request(request).await.unwrap();
+  assert_eq!(response.status(), hyper::StatusCode::OK);
+  let body = http_body_util::BodyExt::collect(response.into_body())
+    .await
+    .unwrap()
+    .to_bytes();
+  assert_eq!(&body[..], b"hello over tls");
+
+  server_task.abort();
+}
