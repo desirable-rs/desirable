@@ -310,6 +310,45 @@ impl Router {
     self.at(hyper::Method::CONNECT, route, dest);
   }
 
+  /// Registers a WebSocket route (feature `websocket`).
+  ///
+  /// The handshake is validated automatically: non-WebSocket requests to
+  /// this path receive `400 Bad Request`. Once upgraded, the callback
+  /// receives the established connection.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// use desirable::{Router, WebSocketConn};
+  /// use desirable::websocket::Message;
+  ///
+  /// let mut app = Router::new();
+  /// app.websocket("/ws", |mut conn: WebSocketConn| async move {
+  ///   while let Some(Ok(msg)) = conn.recv().await {
+  ///     if let Message::Text(text) = msg {
+  ///       conn.send_text(text.to_string()).await.unwrap();
+  ///     }
+  ///   }
+  /// });
+  /// ```
+  #[cfg(feature = "websocket")]
+  pub fn websocket<F, Fut>(&mut self, route: &str, callback: F)
+  where
+    F: Fn(crate::websocket::WebSocketConn) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+  {
+    let callback = std::sync::Arc::new(callback);
+    self.get(route, move |req: crate::Request| {
+      let callback = std::sync::Arc::clone(&callback);
+      async move {
+        match crate::websocket::WebSocketUpgrade::from_request(&req) {
+          Ok(upgrade) => upgrade.on_upgrade(req, move |conn| callback(conn)),
+          Err(response) => Ok(response),
+        }
+      }
+    });
+  }
+
   /// Adds middleware to routes registered after this call.
   ///
   /// Middleware is order-dependent (like axum's `layer`): it applies to the

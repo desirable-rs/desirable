@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.0] - 2026-09-18
+
+### Added
+
+- **WebSocket support** (feature `websocket`): `Router::websocket(path,
+  handler)` validates the handshake, replies `101 Switching Protocols`, and
+  hands the handler an established `WebSocketConn` (`recv` / `send` /
+  `send_text` / `close`). Non-WebSocket requests to a websocket route
+  receive `400 Bad Request`. Backed by `tokio-tungstenite` (no TLS —
+  terminate WSS at a reverse proxy); the hyper `Upgraded` IO is bridged to
+  tokio's IO traits for tungstenite. New optional dependencies:
+  `tokio-tungstenite`, `futures-util` (both feature-gated).
+- Re-exports: `desirable::websocket::Message`, `WebSocketConn`,
+  `WebSocketUpgrade`.
+
+---
+
 ## [2.2.0] - 2026-09-18
 
 ### Added
@@ -402,6 +419,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.3.0]: https://github.com/desirable-rs/desirable/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/desirable-rs/desirable/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/desirable-rs/desirable/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/desirable-rs/desirable/compare/v1.10.0...v2.0.0

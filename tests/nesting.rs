@@ -864,3 +864,58 @@ async fn trusted_proxies_resolve_client_ip() {
 
   server_task.abort();
 }
+
+#[cfg(feature = "websocket")]
+#[tokio::test]
+async fn websocket_echo_and_bad_request_fallback() {
+  use desirable::websocket::Message;
+  use desirable::{Router, WebSocketConn};
+  use futures_util::{SinkExt as _, StreamExt as _};
+
+  async fn echo(mut conn: WebSocketConn) {
+    loop {
+      match conn.recv().await {
+        Some(Ok(msg)) => {
+          if msg.is_text() || msg.is_binary() {
+            if conn.send(msg).await.is_err() {
+              break;
+            }
+          } else if msg.is_close() {
+            // Flush tungstenite's automatic Close reply.
+            let _ = conn.close().await;
+            break;
+          }
+        }
+        Some(Err(_)) | None => break,
+      }
+    }
+  }
+
+  let mut app = Router::new();
+  app.websocket("/ws", |conn: WebSocketConn| echo(conn));
+  app.get("/plain", |_| async { "plain" });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Happy path: full handshake + two-way echo + close.
+  let (mut ws, response) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+    .await
+    .unwrap();
+  assert_eq!(response.status(), hyper::StatusCode::SWITCHING_PROTOCOLS);
+
+  ws.send(Message::text("hello desirable")).await.unwrap();
+  let echoed = ws.next().await.unwrap().unwrap();
+  assert!(matches!(echoed, Message::Text(ref t) if t.contains("hello desirable")));
+
+  ws.send(Message::Close(None)).await.unwrap();
+  let close = ws.next().await.unwrap().unwrap();
+  assert!(close.is_close(), "expected close, got {:?}", close);
+
+  // Non-upgrade request to the websocket route: 400.
+  let res = raw_request(addr, &get_request("/ws")).await;
+  assert!(res.starts_with("HTTP/1.1 400"), "got: {}", res);
+
+  // Plain routes unaffected.
+  let res = raw_request(addr, &get_request("/plain")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+}

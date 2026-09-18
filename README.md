@@ -97,6 +97,22 @@ app.get("/static/*file",
         .cache_control("public, max-age=31536000, immutable"));
 ```
 
+**WebSocket** (feature `websocket`) — handshake, upgrade, and connection
+wrapper handled by the framework:
+
+```rust,ignore
+// features = ["websocket"]
+use desirable::{Router, WebSocketConn};
+use desirable::websocket::Message;
+
+let mut app = Router::new();
+app.websocket("/ws", |mut conn: WebSocketConn| async move {
+    while let Some(Ok(Message::Text(text))) = conn.recv().await {
+        conn.send_text(text.to_string()).await.unwrap(); // echo
+    }
+});
+```
+
 **Sessions** — one line to enable; handlers mutate `req.session()` and the
 `Set-Cookie` header is emitted automatically, only when the session changed
 (`session.destroy()` emits a deletion cookie for logout).

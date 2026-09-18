@@ -2,7 +2,6 @@ use crate::HyperRequest;
 use crate::HyperResponse;
 use crate::Result;
 use crate::Router;
-use hyper::server::conn::http1;
 use hyper::service::Service;
 use hyper_util::rt::TokioIo;
 use ipnet::IpNet;
@@ -317,7 +316,13 @@ async fn accept_loop(
         let trusted = Arc::clone(&trusted);
         let shutdown = shutdown.clone();
         tracker.spawn(async move {
-          let conn = http1::Builder::new().serve_connection(
+          // auto builder: HTTP/1.1 today, and supports the WebSocket
+          // upgrade handshake (http1's serve_connection does not).
+          let builder = hyper_util::server::conn::auto::Builder::new(
+            hyper_util::rt::TokioExecutor::new(),
+          );
+          let conn = builder
+          .serve_connection_with_upgrades(
             io,
             Svc {
               router,

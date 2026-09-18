@@ -43,6 +43,8 @@ pub mod router;
 pub mod server;
 pub mod session;
 pub mod types;
+#[cfg(feature = "websocket")]
+pub mod websocket;
 
 pub use body::{Body, BodySender, BoxError};
 pub use cors::Cors;
@@ -60,6 +62,8 @@ pub use response::Response;
 pub use router::Router;
 pub use server::Server;
 pub use session::{Session, SessionConfig, SessionError, SessionManager};
+#[cfg(feature = "websocket")]
+pub use websocket::{WebSocketConn, WebSocketUpgrade};
 
 pub use types::{AnyResult, HyperRequest, HyperResponse, Result};
 

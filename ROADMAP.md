@@ -24,6 +24,7 @@ arrives.
 | 2.0.0 | Streaming bodies | Concrete `Body` enum (`Full` / `Streaming`), `Body::stream` + `Body::channel` (SSE-capable), static files stream by default with exact `Content-Length`; `utils` removed |
 | 2.1.0 | Content negotiation & caching | `Compression` middleware (feature-gated gzip), precompressed `.gz`/`.br` static assets, `Cache-Control` config, `Session::destroy()` with deletion-cookie integration, CI `--all-features` coverage |
 | 2.2.0 | Static files & proxy environments | Single-range requests (206/416 + If-Range), strong SHA-256 ETag option with caching, `trusted_proxies` + `Request::client_ip()` (rightmost-untrusted X-Forwarded-For), RateLimit keyed on resolved client IP |
+| 2.3.0 | WebSocket | `Router::websocket` + `WebSocketConn`/`WebSocketUpgrade` behind the `websocket` feature (tokio-tungstenite); hyper `Upgraded` bridged to tokio IO for tungstenite |
 
 ## Roadmap: 2.x → 3.0
 
@@ -53,7 +54,7 @@ changes: MSRV/edition, deprecated removals, and the extractor decision.
 - **Strong ETag option** (content hash, computed lazily and cached by
   path+mtime) alongside the default weak validator.
 
-### v2.3 — WebSocket (feature `websocket`)
+### v2.3 — WebSocket (feature `websocket`) ✅ shipped
 
 - Hyper upgrade plumbing + `tokio-tungstenite` handshake.
 - `app.websocket("/ws", handler)`; the handler receives a lightweight
