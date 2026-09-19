@@ -153,22 +153,31 @@ impl Request {
       .map(|l| l.0);
     let body = req.body_mut();
     let collected = match limit {
-      Some(max) => http_body_util::Limited::new(body, max)
-        .collect()
-        .await
-        .map_err(|err| {
+      Some(max) => match http_body_util::Limited::new(body, max).collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(err) => {
           if err
             .downcast_ref::<http_body_util::LengthLimitError>()
             .is_some()
           {
-            crate::Error::BodyTooLarge
-          } else {
-            crate::Error::Any(anyhow::anyhow!("failed to read request body: {err}"))
+            // The connection is about to close with most of the body
+            // unread; drain what's left (bounded) so the kernel doesn't
+            // reset it and destroy the 413 before the client reads it.
+            crate::server::drain_unread_body(req).await;
+            return Err(crate::Error::BodyTooLarge);
           }
-        })?,
-      None => body.collect().await.map_err(crate::Error::Hyper)?,
+          return Err(crate::Error::Any(anyhow::anyhow!(
+            "failed to read request body: {err}"
+          )));
+        }
+      },
+      None => body
+        .collect()
+        .await
+        .map_err(crate::Error::Hyper)?
+        .to_bytes(),
     };
-    Ok(collected.to_bytes())
+    Ok(collected)
   }
 
   /// Returns the request body as a stream of chunks, honoring the

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.0] - 2026-09-19
+
+### Fixed
+
+- **413 responses no longer get destroyed by a TCP reset.** When a request
+  body exceeded the limit, the server closed the connection with most of
+  the body unread; the kernel then sent a TCP reset that could destroy the
+  in-flight 413 before the client read it (client sees `ECONNRESET`). Both
+  rejection paths — the buffered-read limit and the `BodyLimit` fast path —
+  now drain the unread remainder first (bounded: 8 MiB / 5 s) so the
+  connection closes cleanly. Verified against a 10× full-suite run that
+  previously failed ~30% of the time under parallel load.
+
+### Changed
+
+- Dependency upgrades with API migration: `rand` 0.9 → 0.10 (`Rng` trait
+  replaces the removed `RngCore` re-export), `hmac` 0.12 → 0.13 (`KeyInit`
+  in scope), plus `sha2` 0.11, `base64` 0.23 and `tokio-tungstenite` 0.30.
+  No public API affected; all suites green on the new versions.
+
 ## [3.4.0] - 2026-09-19
 
 ### Added
@@ -857,3 +877,4 @@ one dead constructor.
 [3.2.0]: https://github.com/desirable-rs/desirable/compare/v3.1.0...v3.2.0
 [3.3.0]: https://github.com/desirable-rs/desirable/compare/v3.2.0...v3.3.0
 [3.4.0]: https://github.com/desirable-rs/desirable/compare/v3.3.0...v3.4.0
+[3.5.0]: https://github.com/desirable-rs/desirable/compare/v3.4.0...v3.5.0

@@ -70,7 +70,7 @@ pub use store::{MemorySessionStore, SessionStore};
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use rand::RngCore as _;
+use rand::Rng as _;
 use serde::Serialize;
 use std::collections::HashMap;
 

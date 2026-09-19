@@ -29,6 +29,34 @@ const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// with a huge body could buffer the process out of memory.
 pub const DEFAULT_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
+/// How much of an unread oversized request body may be drained before the
+/// connection is closed anyway.
+const OVERSIZED_DRAIN_CAP: usize = 8 * 1024 * 1024;
+
+/// How long a drain of an unread oversized body may take. Past this the
+/// connection is closed (the client then sees a reset instead of the 413 —
+/// acceptable for clients still pushing that much data that fast).
+const OVERSIZED_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reads and discards an unread request body, bounded by
+/// [`OVERSIZED_DRAIN_CAP`] and [`OVERSIZED_DRAIN_TIMEOUT`].
+///
+/// Closing a connection with unread request data in flight makes the kernel
+/// send a TCP reset, which can destroy the response the client hasn't read
+/// yet (e.g. a 413). Draining to EOF first lets the connection close cleanly
+/// so error responses actually arrive. Runs while the connection is still
+/// feeding the body channel, so the drain is deterministic.
+pub(crate) async fn drain_unread_body(req: &mut HyperRequest) {
+  use http_body_util::BodyExt as _;
+
+  let body = req.body_mut();
+  let _ = tokio::time::timeout(
+    OVERSIZED_DRAIN_TIMEOUT,
+    http_body_util::Limited::new(body, OVERSIZED_DRAIN_CAP).collect(),
+  )
+  .await;
+}
+
 /// Maximum time a TLS handshake may take before the connection is dropped
 /// (feature `tls`).
 #[cfg(feature = "tls")]

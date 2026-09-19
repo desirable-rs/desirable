@@ -7,7 +7,7 @@ use super::{Session, SessionData};
 use crate::Result;
 use base64::Engine as _;
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use hyper::http;
 use sha2::Sha256;
 use std::sync::Arc;

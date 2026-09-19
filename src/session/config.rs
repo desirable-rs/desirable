@@ -1,7 +1,7 @@
 //! Configuration builder for session cookies.
 
 use super::data::{DEFAULT_COOKIE_NAME, DEFAULT_MAX_AGE_SECS};
-use rand::RngCore as _;
+use rand::Rng as _;
 
 /// Configuration for session cookie behavior.
 ///

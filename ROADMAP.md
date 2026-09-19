@@ -40,6 +40,7 @@ arrives.
 | 3.2.0 | Safe defaults & testability | Default 2 MiB request-body limit (configurable, middleware overrides) — **behavior change**; `desirable::test` module (`TestServer`/`TestResponse`/`raw_request`, zero deps); per-request `tracing` span with method/path/request-id; `Server::max_connections` fail-fast cap |
 | 3.3.0 | Server-side sessions | `SessionStore` trait + built-in zero-dep `MemorySessionStore`: cookie carries only the signed session ID, enabling real revocation, unbounded session size, and restart invalidation; `read_session` became async (**breaking**); Redis/DB stores via the object-safe trait |
 | 3.4.0 | Uploads & request streaming | `RequestBodyStream` (`body_stream`/`save_body_to`) with limit enforcement; streaming `multipart/form-data` parsing behind the `multipart` feature (multer), semantic error mapping (415/400/413); `example-uploads` |
+| 3.5.0 | Dep refresh + connection hygiene | Dependency majors migrated (rand 0.10, hmac 0.13, sha2 0.11, base64 0.23, tokio-tungstenite 0.30); bounded drain of unread bodies on 413 so error responses survive connection close instead of being destroyed by a TCP reset |
 
 ## Roadmap: 2.x → 3.0
 

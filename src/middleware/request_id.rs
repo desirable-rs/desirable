@@ -1,5 +1,5 @@
 use crate::{Middleware, Next, Request, Result};
-use rand::RngCore as _;
+use rand::Rng as _;
 use std::sync::OnceLock;
 
 /// Header name used by the [`RequestId`] middleware.

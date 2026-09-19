@@ -44,12 +44,15 @@ impl BodyLimit {
 impl Middleware for BodyLimit {
   async fn handle(&self, mut req: Request, next: Next<'_>) -> Result {
     // Fast path: reject declared oversized bodies without reading them.
+    // The unread remainder is drained first (bounded), otherwise closing
+    // the connection resets it and the client may never see the 413.
     if let Some(len) = req
       .header("content-length")
       .and_then(|v| v.to_str().ok())
       .and_then(|v| v.parse::<usize>().ok())
       && len > self.max_bytes
     {
+      crate::server::drain_unread_body(&mut req.inner).await;
       return Ok(Response::with_status_code(
         hyper::StatusCode::PAYLOAD_TOO_LARGE,
         "payload too large".to_string(),
