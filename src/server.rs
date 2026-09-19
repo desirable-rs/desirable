@@ -14,13 +14,20 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing::Instrument as _;
 use tracing::{debug, error, info, warn};
 
 /// Default maximum time in-flight connections are given to finish after a
 /// shutdown signal before the server gives up waiting.
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default maximum request-body size, enforced when a handler buffers the
+/// body (`Request::body`/`body_json`/`form`). Without a default, one request
+/// with a huge body could buffer the process out of memory.
+pub const DEFAULT_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Maximum time a TLS handshake may take before the connection is dropped
 /// (feature `tls`).
@@ -50,6 +57,8 @@ pub(crate) struct Svc {
   /// Connection/task tracker shared with the accept loop, so spawned work
   /// (e.g. WebSocket sessions) is counted by graceful shutdown
   pub(crate) tracker: Arc<TaskTracker>,
+  /// Server-level default request-body limit (`None` = unlimited)
+  pub(crate) body_limit: Option<usize>,
 }
 
 impl Service<HyperRequest> for Svc {
@@ -62,8 +71,29 @@ impl Service<HyperRequest> for Svc {
     let remote_addr = self.remote_addr.clone();
     let trusted = self.trusted_proxies.clone();
     let tracker = Arc::clone(&self.tracker);
-    let res = async { dispatch(req, remote_addr, trusted, tracker, router).await };
+    let body_limit = self.body_limit;
+    let res = async move { dispatch(req, remote_addr, trusted, tracker, body_limit, router).await };
     Box::pin(res)
+  }
+}
+
+/// Creates the per-request tracing span that wraps request handling, so any
+/// `tracing` log emitted by handlers and middleware carries the request's
+/// method, path, and (when the client or `RequestId` provides one) request id.
+fn request_span(method: &hyper::Method, path: &str, request_id: Option<&str>) -> tracing::Span {
+  match request_id {
+    Some(id) => tracing::info_span!(
+      "request",
+      http.method = %method,
+      http.path = %path,
+      http.request_id = %id,
+    ),
+    None => tracing::info_span!(
+      "request",
+      http.method = %method,
+      http.path = %path,
+      http.request_id = tracing::field::Empty,
+    ),
   }
 }
 
@@ -77,6 +107,8 @@ impl Service<HyperRequest> for Svc {
 /// * `req` - The incoming hyper request
 /// * `remote_addr` - The client's socket address (`None` for Unix sockets)
 /// * `trusted_proxies` - Proxy networks trusted to set `X-Forwarded-For`
+/// * `tracker` - Connection task tracker
+/// * `body_limit` - Server-level default request-body limit
 /// * `router` - The application router
 ///
 /// # Returns
@@ -87,20 +119,37 @@ async fn dispatch(
   remote_addr: Option<Arc<SocketAddr>>,
   trusted_proxies: Arc<Vec<IpNet>>,
   tracker: Arc<TaskTracker>,
+  body_limit: Option<usize>,
   router: Arc<Router>,
 ) -> Result<HyperResponse> {
   let mut req = req;
   req.extensions_mut().insert(tracker);
+  // Server-level default body limit. An explicit `BodyLimit` middleware,
+  // installed later in the chain, replaces this value via its own insert.
+  if let Some(max) = body_limit {
+    req
+      .extensions_mut()
+      .insert(crate::middleware::body_limit::BodyLimitValue(max));
+  }
   if let Some(addr) = &remote_addr {
     let client_ip = resolve_client_ip(addr.ip(), req.headers(), &trusted_proxies);
     req
       .extensions_mut()
       .insert(crate::request::ClientIp(client_ip));
   }
+  let span = request_span(
+    req.method(),
+    req.uri().path(),
+    req
+      .headers()
+      .get("x-request-id")
+      .and_then(|v| v.to_str().ok()),
+  );
   // A propagated `Err` (middleware failure, invalid status code, ...) is
   // rendered like any other error — returning it raw would close the
   // connection with no response at all.
-  let response = match router.dispatch(req.into(), remote_addr).await {
+  let fut = router.dispatch(req.into(), remote_addr);
+  let response = match fut.instrument(span).await {
     Ok(resp) => resp,
     Err(err) => crate::error::render_error(err),
   };
@@ -172,6 +221,10 @@ pub struct Server {
   trusted_proxies: Vec<IpNet>,
   /// Maximum time to wait for the client to send complete request headers
   header_read_timeout: Option<Duration>,
+  /// Default request-body limit for handlers that buffer the body
+  body_limit: Option<usize>,
+  /// Hard cap on concurrent connections (`None` = unbounded)
+  max_connections: Option<usize>,
   /// TLS configuration (feature `tls`)
   #[cfg(feature = "tls")]
   tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
@@ -204,6 +257,8 @@ impl Server {
       drain_timeout: DEFAULT_DRAIN_TIMEOUT,
       trusted_proxies: Vec::new(),
       header_read_timeout: None,
+      body_limit: Some(DEFAULT_BODY_LIMIT),
+      max_connections: None,
       #[cfg(feature = "tls")]
       tls: None,
     })
@@ -220,6 +275,8 @@ impl Server {
       drain_timeout: DEFAULT_DRAIN_TIMEOUT,
       trusted_proxies: Vec::new(),
       header_read_timeout: None,
+      body_limit: Some(DEFAULT_BODY_LIMIT),
+      max_connections: None,
       #[cfg(feature = "tls")]
       tls: None,
     }
@@ -252,6 +309,38 @@ impl Server {
   #[must_use]
   pub fn http1_header_read_timeout(mut self, timeout: Duration) -> Self {
     self.header_read_timeout = Some(timeout);
+    self
+  }
+
+  /// Overrides the default request-body limit (2 MiB, see
+  /// [`DEFAULT_BODY_LIMIT`]) enforced when a handler buffers the body via
+  /// [`Request::body`](crate::Request::body) / `body_json` / `form`.
+  /// Exceeding it yields `413 Payload Too Large`.
+  ///
+  /// An explicit [`BodyLimit`](crate::BodyLimit) middleware takes precedence
+  /// over this server-level default.
+  #[must_use]
+  pub fn body_limit(mut self, max_bytes: usize) -> Self {
+    self.body_limit = Some(max_bytes);
+    self
+  }
+
+  /// Disables the server-level request-body limit, restoring fully
+  /// unbounded buffering (not recommended: one request can exhaust memory).
+  #[must_use]
+  pub fn no_body_limit(mut self) -> Self {
+    self.body_limit = None;
+    self
+  }
+
+  /// Caps the number of concurrently handled connections. When the cap is
+  /// reached, new connections are closed immediately (fail fast) instead of
+  /// being queued; a debug-level log records each rejection.
+  ///
+  /// Default: unbounded.
+  #[must_use]
+  pub fn max_connections(mut self, max: usize) -> Self {
+    self.max_connections = Some(max);
     self
   }
 
@@ -393,6 +482,16 @@ impl Server {
     let tracker = Arc::new(TaskTracker::new());
     let shutdown = CancellationToken::new();
     let trusted = Arc::new(self.trusted_proxies.clone());
+    let connection_permits = self
+      .max_connections
+      .map(|max| Arc::new(Semaphore::new(max)));
+    let config = ConnConfig {
+      body_limit: self.body_limit,
+      header_read_timeout: self.header_read_timeout,
+      connection_permits,
+      #[cfg(feature = "tls")]
+      tls_acceptor: self.tls_acceptor(),
+    };
 
     tokio::select! {
       result = accept_loop(
@@ -401,7 +500,7 @@ impl Server {
         Arc::clone(&tracker),
         shutdown.clone(),
         Arc::clone(&trusted),
-        self,
+        config,
       ) => {
         result?;
       }
@@ -588,6 +687,16 @@ where
     .collect()
 }
 
+/// Per-connection serving configuration threaded from `Server` into the
+/// accept loop.
+struct ConnConfig {
+  body_limit: Option<usize>,
+  header_read_timeout: Option<Duration>,
+  connection_permits: Option<Arc<Semaphore>>,
+  #[cfg(feature = "tls")]
+  tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+}
+
 /// Accepts connections in a loop until the listener is closed, an error
 /// occurs, or the shutdown token is cancelled.
 async fn accept_loop<L: Listener>(
@@ -596,10 +705,15 @@ async fn accept_loop<L: Listener>(
   tracker: Arc<TaskTracker>,
   shutdown: CancellationToken,
   trusted: Arc<Vec<IpNet>>,
-  server: &Server,
+  config: ConnConfig,
 ) -> Result<()> {
-  #[cfg(feature = "tls")]
-  let tls_acceptor = server.tls_acceptor();
+  let ConnConfig {
+    body_limit,
+    header_read_timeout,
+    connection_permits,
+    #[cfg(feature = "tls")]
+    tls_acceptor,
+  } = config;
 
   loop {
     let accept_result = tokio::select! {
@@ -625,15 +739,32 @@ async fn accept_loop<L: Listener>(
       }
     };
     let (io, remote_addr) = accept_result;
+    // Concurrency cap: fail fast when full — the permit lives inside the
+    // connection task, so it frees up as soon as the connection finishes
+    // (including failed TLS handshakes).
+    let permit = match connection_permits.as_ref().map(Arc::clone) {
+      Some(sem) => match sem.try_acquire_owned() {
+        Ok(permit) => Some(permit),
+        Err(_) => {
+          debug!(
+            "connection limit reached, rejecting peer {:?}",
+            remote_addr.as_deref().map(|a| a.to_string())
+          );
+          continue; // drops `io`: the client sees a closed connection
+        }
+      },
+      None => None,
+    };
     let router = Arc::clone(&router);
     let trusted = Arc::clone(&trusted);
     let shutdown = shutdown.clone();
-    let header_read_timeout = server.header_read_timeout;
     let conn_tracker = Arc::clone(&tracker);
     #[cfg(feature = "tls")]
     let tls_acceptor = tls_acceptor.clone();
     let svc_tracker = Arc::clone(&conn_tracker);
     conn_tracker.spawn(async move {
+      // Hold the permit for the whole connection lifetime.
+      let _permit = permit;
       // preface is auto-detected), plus WebSocket upgrade support.
       let mut builder =
         hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
@@ -686,6 +817,7 @@ async fn accept_loop<L: Listener>(
           remote_addr,
           trusted_proxies: Arc::clone(&trusted),
           tracker: svc_tracker,
+          body_limit,
         },
       );
       tokio::pin!(conn);
@@ -740,6 +872,93 @@ mod tests {
     let mut headers = hyper::HeaderMap::new();
     headers.insert("x-forwarded-for", value.parse().unwrap());
     headers
+  }
+
+  #[test]
+  fn test_request_span_records_method_path_and_request_id() {
+    use std::sync::{Arc, Mutex};
+
+    /// (span id, name, initial fields) + post-creation records.
+    type CapturedSpans = Vec<(tracing::Id, String, Vec<(String, String)>)>;
+
+    // Captures span creation (name + initial fields) and later `record`
+    // calls (e.g. the request id, which is attached after creation).
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Captured>>);
+
+    #[derive(Default)]
+    struct Captured {
+      spans: CapturedSpans,
+      records: Vec<(tracing::Id, String, String)>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for Capture
+    where
+      S: tracing::Subscriber,
+    {
+      fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+      ) {
+        struct Visitor(Vec<(String, String)>);
+        impl tracing::field::Visit for Visitor {
+          fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self
+              .0
+              .push((field.name().to_string(), format!("{value:?}")));
+          }
+        }
+        let mut visitor = Visitor(Vec::new());
+        attrs.record(&mut visitor);
+        let mut state = self.0.lock().unwrap();
+        state
+          .spans
+          .push((id.clone(), attrs.metadata().name().to_string(), visitor.0));
+      }
+
+      fn on_record(
+        &self,
+        id: &tracing::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+      ) {
+        struct Visitor(Vec<(String, String)>);
+        impl tracing::field::Visit for Visitor {
+          fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self
+              .0
+              .push((field.name().to_string(), format!("{value:?}")));
+          }
+        }
+        let mut visitor = Visitor(Vec::new());
+        values.record(&mut visitor);
+        let mut state = self.0.lock().unwrap();
+        for (field, value) in visitor.0 {
+          state.records.push((id.clone(), field, value));
+        }
+      }
+    }
+
+    let captured = Capture::default();
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let subscriber = tracing_subscriber::registry().with(captured.clone());
+    tracing::subscriber::with_default(subscriber, || {
+      let _a = request_span(&hyper::Method::GET, "/users/42", Some("abc-1"));
+      let _b = request_span(&hyper::Method::POST, "/login", None);
+    });
+
+    let state = captured.0.lock().unwrap();
+    assert_eq!(state.spans.len(), 2);
+    let (_id0, name0, fields0) = &state.spans[0];
+    assert_eq!(name0, "request");
+    assert!(fields0.contains(&("http.method".to_string(), "GET".to_string())));
+    assert!(fields0.contains(&("http.path".to_string(), "/users/42".to_string())));
+    // Incoming request id is part of the span at creation time.
+    assert!(fields0.contains(&("http.request_id".to_string(), "abc-1".to_string())));
+    // No incoming request id on the second span: the field stays empty.
+    assert!(!state.spans[1].2.iter().any(|(f, _)| f == "http.request_id"));
   }
 
   #[test]

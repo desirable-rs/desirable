@@ -65,6 +65,11 @@ impl Middleware for RequestId {
 
     req.extensions_mut().insert(RequestIdValue(id.clone()));
 
+    // When the request runs inside the framework's `request` tracing span,
+    // record the final id so every log line inside handlers carries it.
+    // (Recording an undeclared field on another span is a silent no-op.)
+    tracing::Span::current().record("http.request_id", tracing::field::display(&id));
+
     let mut response = next.run(req).await;
 
     if let (Ok(res), Ok(value)) = (&mut response, hyper::header::HeaderValue::from_str(&id)) {

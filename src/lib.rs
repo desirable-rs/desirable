@@ -42,6 +42,9 @@ pub mod response;
 pub mod router;
 pub mod server;
 pub mod session;
+/// Testing helpers: [`TestServer`](test::TestServer) spawns a router on an
+/// ephemeral port and speaks real HTTP to it, with zero extra dependencies.
+pub mod test;
 #[cfg(feature = "tls")]
 pub mod tls;
 pub mod types;

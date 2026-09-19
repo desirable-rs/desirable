@@ -37,6 +37,7 @@ arrives.
 | 3.0.0 | Breaking convergence | Internal types de-pubbed (`Svc`, `dispatch`), dead `Request::mk_request` removed; trait-redesign declined on benchmark evidence (~38 ns/layer); extractor decision finalized (no extractors, no macros); MSRV 1.88 / edition 2024 confirmed |
 | 3.0.1 | Docs only | README refreshed for 3.x (version refs, MSRV, dependency count, missing capability sections); 5 zero-argument handler closures fixed in doc examples |
 | 3.1.0 | Focused examples | Six one-feature runnable demos (SSE, sessions, static files, middleware tour, WebSocket, TLS) — compile-verified, smoke-tested, clippy-clean examples workspace; `examples/README.md` index |
+| 3.2.0 | Safe defaults & testability | Default 2 MiB request-body limit (configurable, middleware overrides) — **behavior change**; `desirable::test` module (`TestServer`/`TestResponse`/`raw_request`, zero deps); per-request `tracing` span with method/path/request-id; `Server::max_connections` fail-fast cap |
 
 ## Roadmap: 2.x → 3.0
 

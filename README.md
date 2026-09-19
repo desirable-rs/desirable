@@ -171,6 +171,8 @@ let ip = req.client_ip();
 
 **Sensible errors** — client mistakes map to `400`, oversized bodies to `413`; `5xx` bodies never leak internals (they're logged instead). Render all errors your way with `set_error_handler(|err| ...)`.
 
+**Safe by default** — request bodies are capped at 2 MiB (`413` beyond), so one huge upload can't exhaust memory. Raise or lower it per server (`server.body_limit(16 * 1024 * 1024)`, `server.no_body_limit()`) or per route with the `BodyLimit` middleware, which overrides the server default. Optionally cap concurrent connections (`server.max_connections(10_000)` — overflow is closed fail-fast). Every request is also wrapped in a `tracing` span carrying `http.method`/`http.path`/`http.request_id`, so handler logs are auto-correlated.
+
 **Graceful shutdown** — Ctrl+C **and** SIGTERM stop the accept loop, let in-flight requests finish (configurable drain timeout, default 10s), then exit.
 
 ```rust,ignore
@@ -185,9 +187,26 @@ slow-client protection:
 ```rust,ignore
 desirable::Server::bind_unix("/tmp/app.sock")           // UDS instead of TCP
     .http1_header_read_timeout(Duration::from_secs(10)) // slow-loris guard
+    .max_connections(10_000)                            // fail-fast cap
     .run(app).await?;
 
 server.run_tcp_listener(app, listener).await?;          // pre-bound listener
+```
+
+**Testing** — `desirable::test` spawns your router on an ephemeral port and
+speaks real HTTP to it; zero extra dependencies:
+
+```rust,ignore
+#[tokio::test]
+async fn hello_world() {
+    let mut app = desirable::Router::new();
+    app.get("/hello", |_| async { "hi" });
+
+    let server = desirable::test::TestServer::spawn(app).await;
+    let res = server.get("/hello").await;
+    assert_eq!(res.status(), desirable::http::StatusCode::OK);
+    assert_eq!(res.text(), "hi");
+}
 ```
 
 ## Install

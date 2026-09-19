@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.2.0] - 2026-09-19
+
+> **Behavior change, read before upgrading:** request bodies are now capped
+> at **2 MiB by default**. Handlers buffering larger bodies get `413` unless
+> you raise the cap (`server.body_limit(...)`, `server.no_body_limit()`) or
+> install a `BodyLimit` middleware (which overrides the server default).
+> Previously bodies were buffered without any limit — one request could
+> exhaust process memory.
+
+### Added
+
+- **Default request-body limit** (2 MiB, `desirable::server::DEFAULT_BODY_LIMIT`),
+  enforced whenever a handler buffers the body (`Request::body`/`body_json`/
+  `form`), for both declared `Content-Length` and chunked uploads (`413`).
+  Configurable via `Server::body_limit(usize)` / `Server::no_body_limit()`;
+  an explicit `BodyLimit` middleware takes precedence over the default.
+- **`desirable::test` module** — `TestServer::spawn(router)` runs a router on
+  an ephemeral port and speaks real HTTP to it (`get`/`post`/`request`, plus
+  `spawn_with` for server options and `raw_request` for raw-socket cases);
+  `TestResponse` offers status/headers/bytes/text/json. Zero extra
+  dependencies — it reuses the hyper/tokio machinery the framework already
+  ships.
+- **Per-request tracing span**: every request is wrapped in a `request` span
+  with `http.method`, `http.path`, and `http.request_id` (pre-filled from the
+  incoming header; the `RequestId` middleware records the final id into the
+  active span), so handler/middleware logs are automatically correlated.
+- **`Server::max_connections(usize)`** — hard cap on concurrently handled
+  connections via a semaphore; overflow connections are closed fail-fast and
+  logged at debug level. Default remains unbounded.
+
 ## [3.1.0] - 2026-09-19
 
 ### Added
@@ -774,3 +804,4 @@ one dead constructor.
 [3.0.0]: https://github.com/desirable-rs/desirable/compare/v2.9.0...v3.0.0
 [3.0.1]: https://github.com/desirable-rs/desirable/compare/v3.0.0...v3.0.1
 [3.1.0]: https://github.com/desirable-rs/desirable/compare/v3.0.1...v3.1.0
+[3.2.0]: https://github.com/desirable-rs/desirable/compare/v3.1.0...v3.2.0
