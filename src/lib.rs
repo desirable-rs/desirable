@@ -37,6 +37,8 @@ pub mod fs;
 pub mod into_response;
 pub mod kernel;
 pub mod middleware;
+#[cfg(feature = "multipart")]
+pub mod multipart;
 pub mod request;
 pub mod response;
 pub mod router;
@@ -62,7 +64,7 @@ pub use middleware::Compression;
 pub use middleware::{
   BodyLimit, Logger, RateLimit, RequestId, RequestIdValue, SessionHandle, SessionLayer, Timeout,
 };
-pub use request::Request;
+pub use request::{Request, RequestBodyStream};
 pub use response::Response;
 pub use router::Router;
 pub use server::Server;

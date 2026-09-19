@@ -16,7 +16,7 @@ name = "desirable"
 publish = true # no accidents while in dev
 readme = "README.md"
 repository = "https://github.com/desirable-rs/desirable"
-version = "3.3.0"
+version = "3.4.0"
 
 include = [
   "Cargo.toml",
@@ -47,6 +47,8 @@ ipnet = "^2"
 hyper-util = { version = "^0.1.19", features = ["full"] }
 httpdate = "^1.0.3"
 mime = "^0.3.17"
+# multipart/form-data upload parsing (feature `multipart`)
+multer = { version = "^3", optional = true }
 rand = "^0.9.0"
 route-recognizer = "^0.3.1"
 serde = { version = "^1.0.228", features = ["derive"] }
@@ -79,6 +81,8 @@ compression = ["dep:async-compression"]
 websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
 # TLS (rustls) with ALPN negotiation of HTTP/1.1 and HTTP/2
 tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
+# multipart/form-data uploads with request-side streaming
+multipart = ["dep:multer"]
 
 [profile.release]
 codegen-units = 1

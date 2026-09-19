@@ -3,10 +3,12 @@ use crate::Result;
 use crate::error::{invalid_param, missing_param};
 use bytes::Buf;
 use bytes::Bytes;
+use http_body::Body as _;
 use hyper::http::Extensions;
 use route_recognizer::Params;
 use std::any::Any;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -167,6 +169,142 @@ impl Request {
       None => body.collect().await.map_err(crate::Error::Hyper)?,
     };
     Ok(collected.to_bytes())
+  }
+
+  /// Returns the request body as a stream of chunks, honoring the
+  /// body limit (server default or [`crate::BodyLimit`]) — exceeding it
+  /// yields [`crate::Error::BodyTooLarge`] (413).
+  ///
+  /// Use this to handle large uploads without buffering them into memory:
+  /// write each chunk to disk, pipe it to object storage, or hash it while
+  /// it arrives. The stream borrows the request, so keep `req` alive while
+  /// consuming it. Consume it before other body reads — the body can only
+  /// be read once.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// async fn upload(mut req: Request) -> Result {
+  ///   use futures_util::StreamExt as _;
+  ///   let mut file = tokio::fs::File::create("/tmp/upload.bin").await?;
+  ///   let mut stream = req.body_stream();
+  ///   while let Some(chunk) = stream.next().await {
+  ///     file.write_all(&chunk?).await?;
+  ///   }
+  ///   Ok(Response::builder().text("saved"))
+  /// }
+  /// ```
+  pub fn body_stream(&mut self) -> RequestBodyStream<'_> {
+    let limit = self
+      .inner
+      .extensions()
+      .get::<crate::middleware::body_limit::BodyLimitValue>()
+      .map(|l| l.0);
+    RequestBodyStream {
+      body: self.inner.body_mut(),
+      limit,
+      read: 0,
+    }
+  }
+
+  /// Streams the request body straight to a file at `path` and returns the
+  /// number of bytes written — the memory cost is one chunk, regardless of
+  /// upload size.
+  ///
+  /// The body limit (server default or [`crate::BodyLimit`]) still applies:
+  /// exceeding it aborts with [`crate::Error::BodyTooLarge`] (413), leaving
+  /// the partial file behind for the caller to clean up.
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// async fn upload(mut req: Request) -> Result {
+  ///   let written = req.save_body_to("/tmp/upload.bin").await?;
+  ///   Ok(Response::builder().text(format!("{written} bytes saved")))
+  /// }
+  /// ```
+  pub async fn save_body_to(&mut self, path: impl AsRef<std::path::Path>) -> Result<u64> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut file = tokio::fs::File::create(path).await?;
+    let mut stream = std::pin::pin!(self.body_stream());
+    let mut written = 0u64;
+    loop {
+      let chunk =
+        std::future::poll_fn(|cx| futures_core::stream::Stream::poll_next(stream.as_mut(), cx))
+          .await;
+      match chunk {
+        Some(Ok(chunk)) => {
+          file.write_all(&chunk).await?;
+          written += chunk.len() as u64;
+        }
+        Some(Err(err)) => return Err(err),
+        None => break,
+      }
+    }
+    file.flush().await?;
+    Ok(written)
+  }
+
+  /// Parses the request as `multipart/form-data` (feature `multipart`) and
+  /// returns an iterator over its fields. Parsing is streaming: file fields
+  /// can be consumed chunk by chunk via
+  /// [`MultipartField::chunk`](crate::multipart::MultipartField::chunk)
+  /// without buffering the upload in memory.
+  ///
+  /// The body limit still applies — an oversized upload aborts with 413
+  /// mid-parse. Call this at most once per request (the body is consumed).
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::Error::UnsupportedMediaType`] (415) when the request
+  /// is not `multipart/form-data`, and [`crate::Error::Multipart`] (400) for
+  /// malformed multipart bodies (e.g. a missing boundary).
+  ///
+  /// # Example
+  ///
+  /// ```rust,ignore
+  /// use tokio::io::AsyncWriteExt as _;
+  ///
+  /// async fn upload(mut req: Request) -> Result {
+  ///   let mut mp = req.multipart()?;
+  ///   while let Some(mut field) = mp.next_field().await? {
+  ///     if let Some(filename) = field.file_name() {
+  ///       let mut file = tokio::fs::File::create(filename).await?;
+  ///       while let Some(chunk) = field.chunk().await? {
+  ///         file.write_all(&chunk).await?;
+  ///       }
+  ///     }
+  ///   }
+  ///   Ok(Response::builder().text("uploaded"))
+  /// }
+  /// ```
+  #[cfg(feature = "multipart")]
+  pub fn multipart(&mut self) -> Result<crate::multipart::Multipart<'_>> {
+    let content_type = self
+      .inner
+      .headers()
+      .get(hyper::header::CONTENT_TYPE)
+      .and_then(|v| v.to_str().ok())
+      .unwrap_or_default()
+      .to_string();
+    if !content_type.starts_with("multipart/form-data") {
+      return Err(crate::Error::UnsupportedMediaType);
+    }
+    let limit = self
+      .inner
+      .extensions()
+      .get::<crate::middleware::body_limit::BodyLimitValue>()
+      .map(|l| l.0);
+    let stream = RequestBodyStream {
+      body: self.inner.body_mut(),
+      limit,
+      read: 0,
+    };
+    let boundary = multer::parse_boundary(content_type).map_err(crate::Error::Multipart)?;
+    Ok(crate::multipart::Multipart {
+      inner: multer::Multipart::new(stream, boundary),
+    })
   }
 
   /// Parses the query string into type `T`.
@@ -476,6 +614,49 @@ impl Request {
 impl From<HyperRequest> for Request {
   fn from(request: HyperRequest) -> Self {
     Request::new(request, None)
+  }
+}
+
+/// The request body as a stream of chunks.
+///
+/// Returned by [`Request::body_stream`](Request::body_stream); yields
+/// `Bytes` chunks and enforces the configured body limit (yielding
+/// [`crate::Error::BodyTooLarge`] when exceeded). The type borrows the
+/// request, so it must not outlive it.
+pub struct RequestBodyStream<'a> {
+  body: &'a mut hyper::body::Incoming,
+  limit: Option<usize>,
+  read: u64,
+}
+
+impl futures_core::Stream for RequestBodyStream<'_> {
+  type Item = std::result::Result<Bytes, crate::Error>;
+
+  fn poll_next(
+    self: Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<Option<Self::Item>> {
+    let this = self.get_mut();
+    loop {
+      let frame = match std::task::ready!(Pin::new(&mut *this.body).poll_frame(cx)) {
+        None => return std::task::Poll::Ready(None),
+        Some(Err(err)) => {
+          return std::task::Poll::Ready(Some(Err(crate::Error::Hyper(err))));
+        }
+        Some(Ok(frame)) => frame,
+      };
+      // Data frames carry chunks; skip any trailer frame and keep polling.
+      let Some(chunk) = frame.data_ref().cloned() else {
+        continue;
+      };
+      this.read += chunk.len() as u64;
+      if let Some(limit) = this.limit
+        && this.read > limit as u64
+      {
+        return std::task::Poll::Ready(Some(Err(crate::Error::BodyTooLarge)));
+      }
+      return std::task::Poll::Ready(Some(Ok(chunk)));
+    }
   }
 }
 

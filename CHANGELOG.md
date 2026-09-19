@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.0] - 2026-09-19
+
+### Added
+
+- **Request-side streaming** — `Request::body_stream()` returns the body as
+  a chunk stream (honoring the body limit: exceeding it yields 413), and
+  `Request::save_body_to(path)` streams the body straight to a file, one
+  chunk in memory regardless of upload size. Large uploads no longer need
+  to be buffered.
+- **Multipart uploads** (feature `multipart`, via the `multer` crate) —
+  `Request::multipart()` returns a streaming field iterator: form values
+  via `Field::text()`, files chunk-by-chunk via `Field::chunk()` so uploads
+  land on disk without ever being fully buffered. The body limit applies
+  during parsing. Errors map semantically: `415` for non-multipart content
+  types (`Error::UnsupportedMediaType`), `400` for malformed multipart
+  bodies (`Error::Multipart`), `413` when the limit trips mid-parse (the
+  framework error is recovered from multer's stream-error wrapping).
+- `example-uploads` demonstrates both endpoints, smoke-tested with real
+  400 KB curl uploads.
+
 ## [3.3.0] - 2026-09-19
 
 ### Added
@@ -836,3 +856,4 @@ one dead constructor.
 [3.1.0]: https://github.com/desirable-rs/desirable/compare/v3.0.1...v3.1.0
 [3.2.0]: https://github.com/desirable-rs/desirable/compare/v3.1.0...v3.2.0
 [3.3.0]: https://github.com/desirable-rs/desirable/compare/v3.2.0...v3.3.0
+[3.4.0]: https://github.com/desirable-rs/desirable/compare/v3.3.0...v3.4.0

@@ -14,6 +14,7 @@ cargo run -p example-<name>
 | `example-middleware-tour` | `compression` | Every built-in middleware, one line each |
 | `example-websocket` | `websocket` | WebSocket echo over `Router::websocket` |
 | `example-tls` | `tls` | HTTPS with rustls; ALPN negotiates HTTP/2 |
+| `example-uploads` | `multipart` | Streaming multipart file uploads + raw-body streaming to disk |
 | `example-hello` | — | A full application: routing, controllers, services, state |
 
 The first four run with zero setup. `example-websocket` needs a WS client

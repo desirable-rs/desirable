@@ -120,6 +120,13 @@ pub enum Error {
   /// Request body exceeded the configured size limit
   #[error("request body too large")]
   BodyTooLarge,
+  /// Request media type not supported by the endpoint (HTTP 415)
+  #[error("unsupported media type")]
+  UnsupportedMediaType,
+  /// Malformed `multipart/form-data` request (feature `multipart`)
+  #[cfg(feature = "multipart")]
+  #[error("multipart error {0:?}")]
+  Multipart(#[from] multer::Error),
 }
 
 impl Error {
@@ -135,6 +142,9 @@ impl Error {
       | Error::Urlencoded(_)
       | Error::Json(_) => StatusCode::BAD_REQUEST,
       Error::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+      Error::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+      #[cfg(feature = "multipart")]
+      Error::Multipart(_) => StatusCode::BAD_REQUEST,
       _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
   }

@@ -117,6 +117,31 @@ app.get("/events", |_| async {
 });
 ```
 
+**File uploads & request streaming** — consume request bodies chunk by chunk
+(or stream them straight to disk) without buffering, and parse
+`multipart/form-data` (feature `multipart`) with fields streamed through —
+the body limit still applies, aborting oversized uploads with `413`:
+
+```rust,ignore
+// features = ["multipart"]
+app.post("/upload", |mut req: Request| async move {
+    let mut mp = req.multipart()?;
+    while let Some(mut field) = mp.next_field().await? {
+        if let Some(filename) = field.file_name() {
+            let mut file = tokio::fs::File::create(filename).await?;
+            while let Some(chunk) = field.chunk().await? {
+                file.write_all(&chunk).await?;
+            }
+        }
+    }
+    Ok("uploaded".into())
+});
+
+// raw body streaming, any content type:
+let written = req.save_body_to("/tmp/upload.bin").await?;   // bytes on disk
+let stream = req.body_stream();                             // chunk stream
+```
+
 **WebSocket** (feature `websocket`) — handshake, upgrade, and connection
 wrapper handled by the framework:
 
@@ -242,7 +267,7 @@ desirable = "3"
 ## Performance
 
 The release profile ships with LTO, `opt-level = "z"`, and stripped binaries.
-Default builds pull in 26 dependencies (31 entries with the optional
+Default builds pull in 26 dependencies (32 entries with the optional
 `compression`/`websocket`/`tls` feature subtrees — every convenience feature
 is cargo-feature gated, and each gated dependency is mature and widely
 audited). Static routes match in O(1); parameterized routes use
