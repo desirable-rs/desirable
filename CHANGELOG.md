@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.1.0] - 2026-09-19
+
+### Added
+
+- **Focused runnable examples** — one feature per crate under `examples/`,
+  all compile-verified and smoke-tested: `example-sse` (streaming via
+  `Body::channel`), `example-sessions` (login/whoami/logout with auto
+  `Set-Cookie`), `example-static-files` (`ServeDir` + cache/ranges),
+  `example-middleware-tour` (every built-in middleware, feature `compression`),
+  `example-websocket` (echo, feature `websocket`), and `example-tls`
+  (rustls + ALPN h2, feature `tls`, embedding the repo's test certs).
+  `examples/README.md` indexes them with run instructions.
+- Fixed 4 clippy warnings in `example-hello` (enum variant naming) so the
+  examples workspace is also clean under `-D warnings`.
+
 ## [3.0.1] - 2026-09-19
 
 ### Fixed
@@ -758,3 +773,4 @@ one dead constructor.
 
 [3.0.0]: https://github.com/desirable-rs/desirable/compare/v2.9.0...v3.0.0
 [3.0.1]: https://github.com/desirable-rs/desirable/compare/v3.0.0...v3.0.1
+[3.1.0]: https://github.com/desirable-rs/desirable/compare/v3.0.1...v3.1.0

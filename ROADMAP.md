@@ -35,6 +35,8 @@ arrives.
 | 2.8.1 | Negotiation allocations | Allocation-free `Accept-Encoding`/content-type case-insensitive matching in static serving and the gzip middleware; CHANGELOG link/tag backfill (v1.0.0–v1.2.0) |
 | 2.9.0 | Routing algorithmics | O(1) static-route fast path in front of the linear pattern tables, explicit `Router::head()` routes made reachable (HEAD table consulted before the GET fallback), axum-style static-over-param precedence, streaming strong-ETag hashing (no whole-file buffer) |
 | 3.0.0 | Breaking convergence | Internal types de-pubbed (`Svc`, `dispatch`), dead `Request::mk_request` removed; trait-redesign declined on benchmark evidence (~38 ns/layer); extractor decision finalized (no extractors, no macros); MSRV 1.88 / edition 2024 confirmed |
+| 3.0.1 | Docs only | README refreshed for 3.x (version refs, MSRV, dependency count, missing capability sections); 5 zero-argument handler closures fixed in doc examples |
+| 3.1.0 | Focused examples | Six one-feature runnable demos (SSE, sessions, static files, middleware tour, WebSocket, TLS) — compile-verified, smoke-tested, clippy-clean examples workspace; `examples/README.md` index |
 
 ## Roadmap: 2.x → 3.0
 

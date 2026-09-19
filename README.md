@@ -205,7 +205,7 @@ desirable = "3"
 - [docs.rs/desirable](https://docs.rs/desirable) — full API reference
 - [CHANGELOG](CHANGELOG.md) — release notes for every version
 - [ROADMAP](ROADMAP.md) — what shipped, what is deliberately deferred, and why
-- [examples/](examples/) — a small application using routing, middleware, sessions, and static files
+- [examples/](examples/) — one focused runnable demo per feature: SSE, sessions, static files, middleware tour, WebSocket, TLS
 
 ## Performance
 

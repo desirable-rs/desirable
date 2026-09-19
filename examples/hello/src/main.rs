@@ -8,7 +8,7 @@ mod types;
 use config::ENV_NAME;
 use desirable::{ServeDir, ServeFile};
 use std::env;
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 #[tokio::main]
 async fn main() -> desirable::Result<()> {
