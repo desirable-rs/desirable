@@ -83,13 +83,15 @@ impl Middleware for SessionLayer {
     // borrowing, so no per-request allocation happens here.
     let session = {
       let cookie = self.manager.get_cookie_value_str(req.inner.headers());
-      match cookie.map(|c| self.manager.read_session(c)) {
-        Some(Ok(Some(session))) => session,
-        Some(Ok(None)) => self.manager.create_session(),
-        Some(Err(err)) => {
-          debug!(%err, "session cookie rejected, starting a fresh session");
-          self.manager.create_session()
-        }
+      match cookie {
+        Some(cookie) => match self.manager.read_session(cookie).await {
+          Ok(Some(session)) => session,
+          Ok(None) => self.manager.create_session(),
+          Err(err) => {
+            debug!(%err, "session cookie rejected, starting a fresh session");
+            self.manager.create_session()
+          }
+        },
         None => self.manager.create_session(),
       }
     };
@@ -102,19 +104,32 @@ impl Middleware for SessionLayer {
     let mut response = next.run(req).await;
 
     // Persist the session only when handlers actually changed it; a
-    // destroyed session gets a deletion cookie instead.
+    // destroyed session gets a deletion cookie — and, in store mode, its
+    // server-side entry is removed so stolen cookies die immediately.
+    // The lock is dropped (via a snapshot) before awaiting the store, so
+    // the future stays Send.
     if let Ok(res) = &mut response {
-      let session = persist.lock().expect("session mutex poisoned");
-      if session.is_destroyed() {
-        res.append_header(
-          hyper::header::SET_COOKIE,
-          self.manager.make_deletion_cookie(),
-        );
-      } else if session.is_modified() {
-        res.append_header(
-          hyper::header::SET_COOKIE,
-          self.manager.make_cookie_header(&session),
-        );
+      let action = {
+        let session = persist.lock().expect("session mutex poisoned");
+        if session.is_destroyed() {
+          Some((true, session.id().to_string(), session.clone()))
+        } else if session.is_modified() {
+          Some((false, session.id().to_string(), session.clone()))
+        } else {
+          None
+        }
+      };
+      if let Some((destroyed, id, snapshot)) = action {
+        if destroyed {
+          self.manager.revoke_session(&id).await;
+          res.append_header(
+            hyper::header::SET_COOKIE,
+            self.manager.make_deletion_cookie(),
+          );
+        } else {
+          let header = self.manager.persist_session(&snapshot).await;
+          res.append_header(hyper::header::SET_COOKIE, header);
+        }
       }
     }
 

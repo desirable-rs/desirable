@@ -2,6 +2,7 @@
 
 use super::config::SessionConfig;
 use super::error::SessionError;
+use super::store::SessionStore;
 use super::{Session, SessionData};
 use crate::Result;
 use base64::Engine as _;
@@ -31,6 +32,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// ```rust
 /// use desirable::{SessionManager, SessionConfig};
 ///
+/// # #[tokio::main] async fn main() -> Result<(), desirable::Error> {
 /// // Create a manager with a specific signing key
 /// let key = b"your-32-byte-secret-key-here!!!!";
 /// let config = SessionConfig::new(key);
@@ -46,10 +48,12 @@ type HmacSha256 = Hmac<Sha256>;
 ///
 /// // Later, read the session from a request cookie
 /// let cookie_value = manager.write_session(&session);
-/// if let Some(loaded) = manager.read_session(&cookie_value).unwrap() {
+/// if let Some(loaded) = manager.read_session(&cookie_value).await.unwrap() {
 ///     let user_id: Option<i32> = loaded.get("user_id").unwrap();
 ///     println!("User ID: {:?}", user_id);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Cookie Format
@@ -63,13 +67,25 @@ type HmacSha256 = Hmac<Sha256>;
 /// This format provides:
 /// 1. Tamper detection via HMAC signature
 /// 2. Safe transmission via Base64URL encoding
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SessionManager {
   /// The session configuration
   config: Arc<SessionConfig>,
   /// The deletion cookie, precomputed on first use — it is constant for a
   /// given configuration.
   deletion_cookie: std::sync::OnceLock<http::HeaderValue>,
+  /// Server-side session storage. When set, cookies carry only the signed
+  /// session ID and data lives in the store (revocable, unbounded size).
+  store: Option<Arc<dyn SessionStore>>,
+}
+
+impl std::fmt::Debug for SessionManager {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("SessionManager")
+      .field("config", &self.config)
+      .field("store", &self.store.is_some())
+      .finish()
+  }
 }
 
 impl SessionManager {
@@ -98,7 +114,30 @@ impl SessionManager {
     Self {
       config: Arc::new(config),
       deletion_cookie: std::sync::OnceLock::new(),
+      store: None,
     }
+  }
+
+  /// Installs server-side session storage: the cookie carries only the
+  /// signed session ID and the data lives in `store`.
+  ///
+  /// Compared to the default client-cookie mode this enables revocation
+  /// (`Session::destroy()` deletes the stored entry, so stolen cookies die
+  /// immediately), unbounded data size, and — with the in-memory store —
+  /// invalidation of all sessions on restart.
+  ///
+  /// # Example
+  ///
+  /// ```rust
+  /// use desirable::{MemorySessionStore, SessionConfig, SessionManager};
+  ///
+  /// let manager = SessionManager::new(SessionConfig::new(b"your-32-byte-secret-key-here!!!!"))
+  ///     .with_store(MemorySessionStore::new());
+  /// ```
+  #[must_use]
+  pub fn with_store(mut self, store: impl SessionStore) -> Self {
+    self.store = Some(Arc::new(store));
+    self
   }
 
   /// Creates a new `SessionManager` with a randomly generated signing key.
@@ -172,8 +211,10 @@ impl SessionManager {
 
   /// Reads and validates a session from a cookie value.
   ///
-  /// Decodes the cookie value, verifies the HMAC signature, and deserializes
-  /// the session data.
+  /// Decodes the cookie value, verifies the HMAC signature, and loads the
+  /// session — from the cookie payload itself (default mode) or from the
+  /// configured [`SessionStore`](crate::SessionStore) (store mode, where the
+  /// cookie carries only the signed session ID).
   ///
   /// # Arguments
   ///
@@ -181,8 +222,10 @@ impl SessionManager {
   ///
   /// # Returns
   ///
-  /// - `Ok(Some(Session))` if the cookie is valid
-  /// - `Ok(None)` if the cookie is empty
+  /// - `Ok(Some(Session))` if the cookie is valid and (store mode) the
+  ///   session still exists in the store
+  /// - `Ok(None)` if the cookie is empty, or the session was revoked or
+  ///   evicted — the request then starts a fresh session
   /// - `Err(SessionError)` if the cookie is invalid or tampered
   ///
   /// # Errors
@@ -196,6 +239,7 @@ impl SessionManager {
   /// ```rust
   /// use desirable::{SessionManager, SessionConfig};
   ///
+  /// # #[tokio::main] async fn main() -> Result<(), desirable::SessionError> {
   /// let key = b"your-32-byte-secret-key-here!!!!";
   /// let manager = SessionManager::new(SessionConfig::new(key));
   ///
@@ -205,12 +249,14 @@ impl SessionManager {
   /// let cookie = manager.write_session(&session);
   ///
   /// // Later, read the session back
-  /// let loaded = manager.read_session(&cookie).unwrap();
+  /// let loaded = manager.read_session(&cookie).await.unwrap();
   /// assert!(loaded.is_some());
   /// let user_id: Option<i32> = loaded.unwrap().get("user_id").unwrap();
   /// assert_eq!(user_id, Some(42));
+  /// # Ok(())
+  /// # }
   /// ```
-  pub fn read_session(&self, cookie_value: &str) -> Result<Option<Session>> {
+  pub async fn read_session(&self, cookie_value: &str) -> Result<Option<Session>> {
     if cookie_value.is_empty() {
       return Ok(None);
     }
@@ -230,8 +276,19 @@ impl SessionManager {
       mac
         .verify_slice(sig)
         .map_err(|_| SessionError::SignatureMismatch)?;
-      let session_data: SessionData =
-        serde_json::from_slice(data_bytes).map_err(|_| SessionError::InvalidCookie)?;
+
+      // Store mode: the payload is the bare session ID; the data lives
+      // server-side. An unknown ID means the session was revoked, evicted,
+      // or the store restarted — start fresh rather than failing.
+      let session_data = if let Some(store) = &self.store {
+        let id = std::str::from_utf8(data_bytes).map_err(|_| SessionError::InvalidCookie)?;
+        match store.load(id).await {
+          Some(data) => data,
+          None => return Ok(None),
+        }
+      } else {
+        serde_json::from_slice(data_bytes).map_err(|_| SessionError::InvalidCookie)?
+      };
 
       // Server-side expiry: the cookie Max-Age only makes the browser drop
       // the cookie; without this check an exfiltrated cookie would be
@@ -252,8 +309,10 @@ impl SessionManager {
 
   /// Serializes a session to a cookie-safe string.
   ///
-  /// The session data is serialized to JSON, signed with HMAC-SHA256,
-  /// and Base64URL encoded for safe transmission in cookies.
+  /// Default mode: the session data is serialized to JSON, signed with
+  /// HMAC-SHA256, and Base64URL encoded. Store mode: only the session ID is
+  /// signed and encoded — the data was persisted via
+  /// [`SessionManager::persist_session`].
   ///
   /// # Arguments
   ///
@@ -261,12 +320,14 @@ impl SessionManager {
   ///
   /// # Returns
   ///
-  /// A Base64URL-encoded string of the format `data|signature`
+  /// A Base64URL-encoded string of the format `payload|signature`
   ///
   /// # Note
   ///
   /// This method does not set any cookie attributes (path, domain, etc.).
   /// Use [`SessionManager::make_cookie_header`] for a complete cookie header.
+  /// In store mode, call [`SessionManager::persist_session`] instead — it
+  /// saves to the store *and* returns the complete header.
   ///
   /// # Example
   ///
@@ -283,7 +344,11 @@ impl SessionManager {
   /// println!("Cookie value: {}", cookie_value);
   /// ```
   pub fn write_session(&self, session: &Session) -> String {
-    let data_bytes = serde_json::to_vec(&session.inner).unwrap_or_default();
+    let data_bytes = match &self.store {
+      // Store mode: the cookie carries only the signed session ID.
+      Some(_) => session.id().as_bytes().to_vec(),
+      None => serde_json::to_vec(&session.inner).unwrap_or_default(),
+    };
     let mut mac = HmacSha256::new_from_slice(&self.config.signing_key).unwrap();
     mac.update(&data_bytes);
     let signature = mac.finalize().into_bytes();
@@ -291,6 +356,33 @@ impl SessionManager {
     combined.push(b'|');
     combined.extend_from_slice(&signature);
     base64::engine::general_purpose::URL_SAFE.encode(&combined)
+  }
+
+  /// Saves a modified session to the configured store (store mode) and
+  /// returns the complete `Set-Cookie` header value. In default cookie mode
+  /// this is an alias for [`SessionManager::make_cookie_header`].
+  ///
+  /// # Arguments
+  ///
+  /// * `session` - The session to persist
+  pub async fn persist_session(&self, session: &Session) -> http::HeaderValue {
+    if let Some(store) = &self.store {
+      store.save(&session.inner).await;
+    }
+    self.make_cookie_header(session)
+  }
+
+  /// Deletes the session with the given ID from the configured store —
+  /// the server-side half of `Session::destroy()`. A no-op in default
+  /// cookie mode (where nothing is stored server-side).
+  ///
+  /// # Arguments
+  ///
+  /// * `id` - The session ID to revoke
+  pub async fn revoke_session(&self, id: &str) {
+    if let Some(store) = &self.store {
+      store.remove(id).await;
+    }
   }
 
   /// Creates a complete Set-Cookie header value for a session.

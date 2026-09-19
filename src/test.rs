@@ -106,6 +106,18 @@ impl TestServer {
   /// response. Each call opens its own connection (no keep-alive bookkeeping
   /// in tests).
   pub async fn request(&self, method: &str, path: &str, body: Option<Bytes>) -> TestResponse {
+    self.request_with(method, path, &[], body).await
+  }
+
+  /// Like [`TestServer::request`], but sends extra headers — cookies,
+  /// authorization, content types, and so on.
+  pub async fn request_with(
+    &self,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<Bytes>,
+  ) -> TestResponse {
     use http_body_util::BodyExt as _;
 
     let stream = tokio::net::TcpStream::connect(self.addr).await.unwrap();
@@ -120,7 +132,14 @@ impl TestServer {
       .method(method)
       .uri(self.url(path))
       .header(hyper::header::CONNECTION, "close");
-    if body.is_some() {
+    for (name, value) in headers {
+      builder = builder.header(*name, *value);
+    }
+    if body.is_some()
+      && !headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("content-type"))
+    {
       builder = builder.header(hyper::header::CONTENT_TYPE, "application/octet-stream");
     }
     let req = builder

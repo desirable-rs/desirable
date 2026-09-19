@@ -66,7 +66,9 @@ pub use request::Request;
 pub use response::Response;
 pub use router::Router;
 pub use server::Server;
-pub use session::{Session, SessionConfig, SessionError, SessionManager};
+pub use session::{
+  MemorySessionStore, Session, SessionConfig, SessionError, SessionManager, SessionStore,
+};
 #[cfg(feature = "tls")]
 pub use tls::server_config_from_pem;
 #[cfg(feature = "websocket")]

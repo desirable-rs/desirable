@@ -158,6 +158,19 @@ app.post("/login", |req: Request| async move {
 });
 ```
 
+**Server-side sessions** — install a `SessionStore` and the cookie carries
+only the signed session ID while data lives server-side. That enables real
+revocation (destroy deletes the stored entry, so stolen cookies die
+immediately instead of surviving to `max_age`), unbounded session size, and
+(with the built-in in-memory store) invalidation on restart. Implement the
+`SessionStore` trait (load/save/remove) to plug in Redis or a database:
+
+```rust,ignore
+use desirable::{MemorySessionStore, SessionManager};
+
+let manager = SessionManager::new(config).with_store(MemorySessionStore::new());
+```
+
 **Trusted proxies** — behind nginx/ALB, declare which peers may set `X-Forwarded-For`; the rightmost non-trusted address becomes `req.client_ip()` (also the rate-limit key). Off by default — a direct client's spoofed header is ignored:
 
 ```rust,ignore

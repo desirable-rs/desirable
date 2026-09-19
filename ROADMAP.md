@@ -38,6 +38,7 @@ arrives.
 | 3.0.1 | Docs only | README refreshed for 3.x (version refs, MSRV, dependency count, missing capability sections); 5 zero-argument handler closures fixed in doc examples |
 | 3.1.0 | Focused examples | Six one-feature runnable demos (SSE, sessions, static files, middleware tour, WebSocket, TLS) — compile-verified, smoke-tested, clippy-clean examples workspace; `examples/README.md` index |
 | 3.2.0 | Safe defaults & testability | Default 2 MiB request-body limit (configurable, middleware overrides) — **behavior change**; `desirable::test` module (`TestServer`/`TestResponse`/`raw_request`, zero deps); per-request `tracing` span with method/path/request-id; `Server::max_connections` fail-fast cap |
+| 3.3.0 | Server-side sessions | `SessionStore` trait + built-in zero-dep `MemorySessionStore`: cookie carries only the signed session ID, enabling real revocation, unbounded session size, and restart invalidation; `read_session` became async (**breaking**); Redis/DB stores via the object-safe trait |
 
 ## Roadmap: 2.x → 3.0
 

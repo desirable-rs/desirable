@@ -60,11 +60,13 @@ mod config;
 mod data;
 mod error;
 mod manager;
+mod store;
 
 pub use config::SessionConfig;
 pub use data::SessionData;
 pub use error::SessionError;
 pub use manager::SessionManager;
+pub use store::{MemorySessionStore, SessionStore};
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
@@ -732,8 +734,8 @@ mod tests {
     assert!(session.is_empty());
   }
 
-  #[test]
-  fn test_session_manager_roundtrip() {
+  #[tokio::test]
+  async fn test_session_manager_roundtrip() {
     let key = b"this-is-a-32-byte-secret-key-!!!!";
     let manager = SessionManager::new(SessionConfig::new(key));
 
@@ -744,7 +746,7 @@ mod tests {
     let cookie_value = manager.write_session(&session);
     assert!(!cookie_value.is_empty());
 
-    let loaded = manager.read_session(&cookie_value).unwrap().unwrap();
+    let loaded = manager.read_session(&cookie_value).await.unwrap().unwrap();
     assert_eq!(loaded.id(), session.id());
     let user_id: Option<i32> = loaded.get("user_id").unwrap();
     assert_eq!(user_id, Some(123));
@@ -762,8 +764,8 @@ mod tests {
     assert!(header.to_str().unwrap().contains("HttpOnly"));
   }
 
-  #[test]
-  fn test_session_expiry_enforced_server_side() {
+  #[tokio::test]
+  async fn test_session_expiry_enforced_server_side() {
     let key = b"this-is-a-32-byte-secret-key-!!!!";
     // max_age_secs(-1): every session is already expired.
     let expired_manager = SessionManager::new(SessionConfig::new(key).max_age_secs(-1));
@@ -771,7 +773,7 @@ mod tests {
     session.insert("user_id", 1).unwrap();
     let cookie = expired_manager.write_session(&session);
 
-    let err = expired_manager.read_session(&cookie).unwrap_err();
+    let err = expired_manager.read_session(&cookie).await.unwrap_err();
     assert!(matches!(
       err,
       crate::error::Error::Session(crate::session::SessionError::Expired)
@@ -782,7 +784,7 @@ mod tests {
     let mut live = live_manager.create_session();
     live.insert("user_id", 1).unwrap();
     let cookie = live_manager.write_session(&live);
-    let loaded = live_manager.read_session(&cookie).unwrap().unwrap();
+    let loaded = live_manager.read_session(&cookie).await.unwrap().unwrap();
     let user_id: Option<i32> = loaded.get("user_id").unwrap();
     assert_eq!(user_id, Some(1));
   }
@@ -796,8 +798,8 @@ mod tests {
     assert_ne!(session.id(), old);
   }
 
-  #[test]
-  fn test_cookie_value_with_base64_padding_survives() {
+  #[tokio::test]
+  async fn test_cookie_value_with_base64_padding_survives() {
     // Regression test: cookie values are base64 and usually end in '='
     // padding. The old `split('=').nth(1)` lookup truncated at the first
     // '=' inside the value, breaking signature verification.
@@ -831,6 +833,6 @@ mod tests {
     // The full value (padding included) must come back and must verify.
     let got = manager.get_cookie_value(&headers).unwrap();
     assert_eq!(got, cookie_value);
-    assert!(manager.read_session(&got).unwrap().is_some());
+    assert!(manager.read_session(&got).await.unwrap().is_some());
   }
 }

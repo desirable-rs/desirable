@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.3.0] - 2026-09-19
+
+### Added
+
+- **Server-side sessions** (`SessionStore` trait + built-in
+  `MemorySessionStore`). Installing a store switches the manager from
+  client-cookie sessions to server-side ones: the cookie carries only the
+  signed session ID and the data lives in the store. Compared to cookie
+  mode this enables real **revocation** (`Session::destroy()` deletes the
+  stored entry, so a stolen cookie dies immediately instead of surviving
+  to `max_age`), **unbounded session size** (64 KB round-trips in e2e where
+  the cookie stays ~200 bytes), and — with the in-memory store —
+  invalidation of all sessions on process restart. The trait is
+  object-safe for Redis/database implementations.
+  Eviction in the memory store: sessions idle over 1 h drop first at
+  capacity, then the least-recently-touched one.
+
+### Changed (breaking)
+
+- **`SessionManager::read_session` is now `async`** — it consults the
+  configured store. Cookie-mode callers add `.await`; the
+  `SessionLayer`-driven request path is unchanged. New methods:
+  `persist_session` (save + complete `Set-Cookie`) and `revoke_session`
+  (server-side destroy, no-op in cookie mode).
+
+### Fixed
+
+- 3 session doctests made executable (`#[tokio::main]`) with the correct
+  32-byte signing key after the async conversion.
+
 ## [3.2.0] - 2026-09-19
 
 > **Behavior change, read before upgrading:** request bodies are now capped
@@ -805,3 +835,4 @@ one dead constructor.
 [3.0.1]: https://github.com/desirable-rs/desirable/compare/v3.0.0...v3.0.1
 [3.1.0]: https://github.com/desirable-rs/desirable/compare/v3.0.1...v3.1.0
 [3.2.0]: https://github.com/desirable-rs/desirable/compare/v3.1.0...v3.2.0
+[3.3.0]: https://github.com/desirable-rs/desirable/compare/v3.2.0...v3.3.0
