@@ -119,8 +119,9 @@ fn resolve_client_ip(
 
   // The X-Forwarded-For chain is only honored when the immediate peer is a
   // trusted proxy. A direct client can set the header to anything, so
-  // without this gate the client IP is fully attacker-controlled.
-  if !trusted.iter().any(|net| net.contains(&peer)) {
+  // without this gate the client IP is fully attacker-controlled. The
+  // common no-proxies deployment short-circuits here.
+  if trusted.is_empty() || !trusted.iter().any(|net| net.contains(&peer)) {
     return peer;
   }
 

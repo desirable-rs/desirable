@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.9.0] - 2026-09-19
+
+### Fixed
+
+- **Explicit `Router::head()` routes are now reachable**: HEAD requests
+  consult the HEAD route table (static and parameterized) before falling
+  back to GET. Previously the HEAD table was never consulted at dispatch,
+  so every `head()` route silently returned `405` instead of running its
+  handler.
+
+### Performance
+
+- **O(1) static-route matching**: routes without `:param`/`*wildcard`
+  segments are additionally indexed in an exact-match HashMap consulted
+  before the linear pattern tables. With many routes, a static request
+  costs one hash lookup instead of one pattern match per registered route;
+  parameterized matching, trailing-slash tolerance, `merge`, and the 405
+  `Allow` computation keep their semantics. Static routes stay visible in
+  the public `routes` field.
+
+### Changed
+
+- **Static routes take precedence over parameterized/wildcard routes**
+  regardless of registration order (axum/matchit-style). Previously the
+  first-registered route won, so a `/:id` pattern registered before
+  `/users/new` would capture `/users/new`. Affects only routers where a
+  static path collides with a pattern registered earlier.
+
+### Performance (static files)
+
+- **Strong ETags hash files in 64 KiB chunks** instead of buffering the
+  whole file into memory — a 1 GB asset no longer causes a 1 GB spike on
+  first request.
+- `client_ip()` resolution short-circuits when no trusted proxies are
+  configured (the common direct-exposure deployment).
+
+---
+
 ## [2.8.1] - 2026-09-19
 
 ### Performance
@@ -662,3 +700,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [1.0.0]: https://github.com/desirable-rs/desirable/releases/tag/v1.0.0
 
 [2.8.1]: https://github.com/desirable-rs/desirable/compare/v2.8.0...v2.8.1
+
+[2.9.0]: https://github.com/desirable-rs/desirable/compare/v2.8.1...v2.9.0

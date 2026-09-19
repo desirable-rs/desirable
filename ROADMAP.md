@@ -33,6 +33,7 @@ arrives.
 | 2.7.1 | Docs only | Documentation aligned with behavior (error status mapping, header read timeout default, rate-limit keying, session doctest) |
 | 2.8.0 | Hot-path allocations & syscalls | Zero-alloc cookie lookup (parse only the match), fewer static-file syscalls (redundant `metadata`/`fstat` removed, `ServeDir` base resolved once), builder-time `HeaderValue` parsing (`Cache-Control`), precomputed deletion cookie, allocation-free 429, zero-copy fixed-text responses, single-pass `Cow`/`Bytes` responses |
 | 2.8.1 | Negotiation allocations | Allocation-free `Accept-Encoding`/content-type case-insensitive matching in static serving and the gzip middleware; CHANGELOG link/tag backfill (v1.0.0–v1.2.0) |
+| 2.9.0 | Routing algorithmics | O(1) static-route fast path in front of the linear pattern tables, explicit `Router::head()` routes made reachable (HEAD table consulted before the GET fallback), axum-style static-over-param precedence, streaming strong-ETag hashing (no whole-file buffer) |
 
 ## Roadmap: 2.x → 3.0
 

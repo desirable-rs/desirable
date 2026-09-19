@@ -151,6 +151,66 @@ async fn head_falls_back_to_get_on_plain_router() {
 }
 
 #[tokio::test]
+async fn explicit_head_route_is_served() {
+  let mut app = Router::new();
+  app.head("/ping", |_| async { "pong" });
+  app.get("/data", |_| async { "payload" });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // The explicit HEAD route answers HEAD requests (200, hyper suppresses
+  // the body but keeps the headers — Content-Length reflects "pong").
+  let head_req = "HEAD /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, head_req).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  let content_length = res
+    .lines()
+    .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+    .map(|l| l.trim().to_string())
+    .unwrap_or_default();
+  assert!(
+    content_length.ends_with('4'),
+    "HEAD should report the GET-equivalent length, got: {content_length:?}"
+  );
+
+  // GET does not fall back to HEAD: 405 with Allow.
+  let res = raw_request(addr, &get_request("/ping")).await;
+  assert!(res.starts_with("HTTP/1.1 405"), "got: {}", res);
+  assert!(res.to_ascii_lowercase().contains("allow: head"));
+
+  // HEAD still falls back to GET when only a GET route exists.
+  let head_data = "HEAD /data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+  let res = raw_request(addr, head_data).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+}
+
+#[tokio::test]
+async fn static_route_takes_priority_over_parameterized() {
+  let mut app = Router::new();
+  // Parameterized route registered FIRST — the static route still wins for
+  // its exact path (axum/matchit-style precedence).
+  app.get("/users/:id", |req: Request| async move {
+    match req.param_str("id") {
+      Ok(id) => format!("user-{id}"),
+      Err(_) => "bad-id".to_string(),
+    }
+  });
+  app.get("/users/new", |_| async { "new-user" });
+
+  let (addr, _server) = spawn_server(app).await;
+
+  // Exact static path: static handler, not the :id param.
+  let res = raw_request(addr, &get_request("/users/new")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.contains("new-user"), "got: {}", res);
+
+  // Everything else still flows through the parameterized route.
+  let res = raw_request(addr, &get_request("/users/42")).await;
+  assert!(res.starts_with("HTTP/1.1 200"), "got: {}", res);
+  assert!(res.contains("user-42"), "got: {}", res);
+}
+
+#[tokio::test]
 async fn timeout_middleware_returns_408_for_slow_handlers() {
   use std::time::Duration;
 

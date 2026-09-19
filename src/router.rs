@@ -38,6 +38,10 @@ pub struct Router {
   /// target's tables instead of replacing them, so routes registered on both
   /// routers survive a merge.
   pub routes: HashMap<hyper::Method, Vec<route_recognizer::Router<Box<DynEndpoint>>>>,
+  /// Exact-match fast path for routes without `:param`/`*wildcard`
+  /// segments, consulted before the linear pattern tables. Routes are
+  /// registered here *and* in `routes`; the fast map only answers first.
+  static_routes: HashMap<hyper::Method, HashMap<String, Box<DynEndpoint>>>,
   /// Handler for unmatched routes
   pub not_found_handler: Box<DynEndpoint>,
   /// Handler for paths that exist under other methods
@@ -70,6 +74,18 @@ impl Endpoint for ScopedEndpoint {
     }
     .run(req)
     .await
+  }
+}
+
+/// Shared handle letting one endpoint live in both the static fast map and
+/// the pattern tables (`dyn Endpoint` is not `Clone`). Static routes pay one
+/// extra virtual call; parameterized routes are registered unshared.
+struct SharedEndpoint(Arc<DynEndpoint>);
+
+#[async_trait::async_trait]
+impl Endpoint for SharedEndpoint {
+  async fn call(&self, req: Request) -> Result {
+    self.0.call(req).await
   }
 }
 
@@ -120,6 +136,7 @@ impl Router {
       middlewares: Vec::new(),
       middlewares_arc: Arc::new(Vec::new()),
       routes: HashMap::new(),
+      static_routes: HashMap::new(),
       not_found_handler: Box::new(default_handler),
       method_not_allowed_handler: Box::new(default_method_not_allowed_handler),
       state: None,
@@ -204,11 +221,29 @@ impl Router {
         middlewares: Arc::clone(&self.middlewares_arc),
       })
     };
-    let tables = self.routes.entry(method).or_default();
+    let tables = self.routes.entry(method.clone()).or_default();
     if tables.is_empty() {
       tables.push(route_recognizer::Router::new());
     }
-    tables.last_mut().unwrap().add(&path, endpoint);
+    if !path.contains(':') && !path.contains('*') {
+      // Static path: also register in the O(1) fast map. `or_insert` keeps
+      // first-registration-wins; the pattern-table copy stays for public
+      // introspection of `routes` but is never dispatched (the fast map
+      // answers first).
+      let shared: Arc<DynEndpoint> = Arc::from(endpoint);
+      tables
+        .last_mut()
+        .unwrap()
+        .add(&path, Box::new(SharedEndpoint(Arc::clone(&shared))));
+      self
+        .static_routes
+        .entry(method)
+        .or_default()
+        .entry(path)
+        .or_insert_with(|| Box::new(SharedEndpoint(shared)));
+    } else {
+      tables.last_mut().unwrap().add(&path, endpoint);
+    }
   }
 
   /// Adds a GET route.
@@ -404,6 +439,14 @@ impl Router {
     for (method, tables) in target.routes {
       self.routes.entry(method).or_default().extend(tables);
     }
+    // Fast-map entries: the parent's existing routes win (same
+    // first-registration-wins rule as `at`).
+    for (method, table) in target.static_routes {
+      let dst = self.static_routes.entry(method).or_default();
+      for (path, endpoint) in table {
+        dst.entry(path).or_insert(endpoint);
+      }
+    }
   }
 
   /// Dispatches a request to the appropriate handler.
@@ -421,7 +464,7 @@ impl Router {
   pub async fn dispatch(&self, mut req: Request, remote_addr: Option<Arc<SocketAddr>>) -> Result {
     let mut params = route_recognizer::Params::new();
 
-    // HEAD falls back to the GET route table; the body is stripped below.
+    // Explicit HEAD routes are consulted before falling back to GET.
     let is_head = *req.method() == hyper::Method::HEAD;
 
     // Fallback handlers run inside the router-level middleware chain; matched
@@ -433,13 +476,15 @@ impl Router {
     // `self`, so the borrows end before `req` is mutated below and no
     // per-request allocation is needed.
     let matched = {
-      let lookup_method: &hyper::Method = if is_head {
-        &hyper::Method::GET
-      } else {
-        req.method()
-      };
       let path = req.uri().path();
-      self.match_path(lookup_method, path)
+      let lookup = |method: &hyper::Method| -> Option<(&DynEndpoint, route_recognizer::Params)> {
+        self.lookup(method, path)
+      };
+      if is_head {
+        lookup(&hyper::Method::HEAD).or_else(|| lookup(&hyper::Method::GET))
+      } else {
+        lookup(req.method())
+      }
     };
 
     let (endpoint, middlewares): (&DynEndpoint, &[Arc<dyn Middleware>]) =
@@ -480,6 +525,31 @@ impl Router {
     response
   }
 
+  /// Looks up `method` + `path`: the O(1) static fast map first (exact path,
+  /// then trailing-slash-trimmed), then the pattern tables.
+  fn lookup(
+    &self,
+    method: &hyper::Method,
+    path: &str,
+  ) -> Option<(&DynEndpoint, route_recognizer::Params)> {
+    let trimmed = path.strip_suffix('/').filter(|t| !t.is_empty());
+    let static_hit = self
+      .static_exact(method, path)
+      .or_else(|| trimmed.and_then(|t| self.static_exact(method, t)));
+    if let Some(endpoint) = static_hit {
+      return Some((endpoint, route_recognizer::Params::new()));
+    }
+    self.match_path(method, path)
+  }
+
+  fn static_exact(&self, method: &hyper::Method, path: &str) -> Option<&DynEndpoint> {
+    self
+      .static_routes
+      .get(method)?
+      .get(path)
+      .map(|endpoint| &**endpoint)
+  }
+
   /// Attempts to match `method`'s route tables against `path`, tolerating a
   /// trailing slash: `/users/` falls back to `/users` when no exact route
   /// (or route registered with a trailing slash) matches.
@@ -502,7 +572,8 @@ impl Router {
   }
 
   /// Returns the HTTP methods whose route tables contain a match for `path`,
-  /// sorted for a stable `Allow` header. Tolerates a trailing slash.
+  /// sorted for a stable `Allow` header. Tolerates a trailing slash. Static
+  /// fast-map hits count as matches too.
   fn matching_methods(&self, path: &str) -> Vec<hyper::Method> {
     let trimmed = path.strip_suffix('/').filter(|t| !t.is_empty());
     let matches = |table: &route_recognizer::Router<Box<DynEndpoint>>| {
@@ -512,7 +583,12 @@ impl Router {
     let mut methods: Vec<hyper::Method> = self
       .routes
       .iter()
-      .filter(|(_, tables)| tables.iter().any(matches))
+      .filter(|(method, tables)| {
+        let static_hit = self.static_routes.get(method).is_some_and(|t| {
+          t.contains_key(path) || trimmed.is_some_and(|trimmed| t.contains_key(trimmed))
+        });
+        static_hit || tables.iter().any(matches)
+      })
       .map(|(method, _)| method.clone())
       .collect();
     methods.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -648,5 +724,86 @@ mod tests {
     // Scoped middleware survived the merge: chain captured on the endpoint.
     let tables = app.routes.get(&hyper::Method::GET).unwrap();
     assert!(tables.iter().any(|t| t.recognize("/api/ping").is_ok()));
+  }
+
+  #[test]
+  fn test_static_fast_path_hits_and_param_falls_through() {
+    let mut router = Router::new();
+    router.get("/users/:id", |_| async { "param" });
+    router.get("/users/new", |_| async { "static" });
+    router.get("/health", |_| async { "ok" });
+
+    // Static routes land in the fast map...
+    assert!(
+      router
+        .static_exact(&hyper::Method::GET, "/health")
+        .is_some()
+    );
+    // ...parameterized routes never do.
+    assert!(
+      router
+        .static_exact(&hyper::Method::GET, "/users/:id")
+        .is_none()
+    );
+
+    // Static wins over the parameterized pattern regardless of order:
+    // a static hit carries no params, so `id` is absent.
+    let (_, params) = router.lookup(&hyper::Method::GET, "/users/new").unwrap();
+    assert!(params.find("id").is_none(), "static route must win");
+
+    // The parameterized pattern still serves everything else.
+    let (_, params) = router.lookup(&hyper::Method::GET, "/users/42").unwrap();
+    assert_eq!(params.find("id"), Some("42"));
+  }
+
+  #[test]
+  fn test_static_fast_path_trailing_slash() {
+    let mut router = Router::new();
+    router.get("/users", |_| async { "users" });
+
+    let (endpoint, params) = router.lookup(&hyper::Method::GET, "/users/").unwrap();
+    assert!(params.iter().next().is_none());
+    // Same endpoint object as the exact lookup (fast map, not the tables).
+    let (exact, _) = router.lookup(&hyper::Method::GET, "/users").unwrap();
+    assert!(std::ptr::eq(endpoint, exact));
+  }
+
+  #[test]
+  fn test_head_table_consulted_before_get_fallback() {
+    let mut router = Router::new();
+    router.get("/only-get", |_| async { "get" });
+    router.head("/ping", |_| async { "pong" });
+
+    // Explicit HEAD routes are reachable through the HEAD table (lookup is
+    // per-method; dispatch applies the HEAD→GET fallback on top).
+    assert!(router.lookup(&hyper::Method::HEAD, "/ping").is_some());
+    assert!(router.lookup(&hyper::Method::HEAD, "/only-get").is_none());
+    // GET does not fall back to HEAD.
+    assert!(router.lookup(&hyper::Method::GET, "/ping").is_none());
+    // And the static fast map holds the HEAD route too.
+    assert!(router.static_exact(&hyper::Method::HEAD, "/ping").is_some());
+  }
+
+  #[test]
+  fn test_merge_merges_static_fast_map() {
+    let mut a = Router::new();
+    a.get("/a", |_| async { "a" });
+    let mut b = Router::new();
+    b.get("/b", |_| async { "b" });
+    a.merge(b);
+
+    assert!(a.static_exact(&hyper::Method::GET, "/a").is_some());
+    assert!(a.static_exact(&hyper::Method::GET, "/b").is_some());
+  }
+
+  #[test]
+  fn test_matching_methods_includes_static_hits() {
+    let mut router = Router::new();
+    router.get("/only-get", |_| async { "get" });
+    router.post("/only-post", |_| async { "post" });
+
+    let methods = router.matching_methods("/only-get");
+    assert_eq!(methods, vec![hyper::Method::GET]);
+    assert!(router.matching_methods("/nope").is_empty());
   }
 }

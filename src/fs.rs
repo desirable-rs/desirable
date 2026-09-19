@@ -296,7 +296,8 @@ fn common_headers(
 
 /// Computes (and caches by path+mtime+size) a strong content-hash ETag.
 ///
-/// The first request for each file version reads the whole file; later
+/// The first request for each file version hashes the file — streamed in
+/// 64 KiB chunks, so a large file never buffers into memory — and later
 /// requests reuse the cache until the file changes.
 async fn strong_etag_for(
   path: &Path,
@@ -326,12 +327,19 @@ async fn strong_etag_for(
     return Ok(tag.clone());
   }
 
-  let mut buf = Vec::with_capacity(size as usize);
+  let mut hasher = Sha256::new();
+  let mut buf = vec![0u8; 64 * 1024];
   file.seek(std::io::SeekFrom::Start(0)).await?;
-  file.read_to_end(&mut buf).await?;
+  loop {
+    let n = file.read(&mut buf).await?;
+    if n == 0 {
+      break;
+    }
+    hasher.update(&buf[..n]);
+  }
   file.seek(std::io::SeekFrom::Start(0)).await?;
 
-  let digest = Sha256::digest(&buf);
+  let digest = hasher.finalize();
   let mut hex = String::with_capacity(32);
   for byte in &digest[..16] {
     use std::fmt::Write as _;
