@@ -175,6 +175,14 @@ struct ServeOptions {
   strong_etag: bool,
 }
 
+/// Case-insensitive ASCII `starts_with` for a trimmed string — no
+/// allocation (header paths call this per request).
+fn starts_with_ignore_case(part: &str, prefix: &str) -> bool {
+  let part = part.trim();
+  part.len() >= prefix.len()
+    && part.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
 /// Returns true when the request's `Accept-Encoding` mentions `token`.
 fn accepts_encoding(req: &Request, token: &str) -> bool {
   req
@@ -182,7 +190,7 @@ fn accepts_encoding(req: &Request, token: &str) -> bool {
     .and_then(|v| v.to_str().ok())
     .is_some_and(|v| {
       v.split(',')
-        .any(|part| part.trim().to_ascii_lowercase().starts_with(token))
+        .any(|part| starts_with_ignore_case(part, token))
     })
 }
 
@@ -737,6 +745,15 @@ impl Endpoint for ServeDir {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn test_starts_with_ignore_case() {
+    assert!(starts_with_ignore_case("br", "br"));
+    assert!(starts_with_ignore_case("BR", "br"));
+    assert!(starts_with_ignore_case(" GZip ; q=0.1", "gzip"));
+    assert!(!starts_with_ignore_case("b", "br"));
+    assert!(!starts_with_ignore_case("deflate", "gzip"));
+  }
 
   #[test]
   fn test_serve_file_new() {

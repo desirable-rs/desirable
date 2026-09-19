@@ -32,6 +32,7 @@ arrives.
 | 2.7.0 | Operational hardening | Fatal accept errors no longer orphan in-flight connections (drain runs either way, transient errors retried), bounded shutdown-aware TLS handshakes, WS sessions tracked by graceful shutdown, declared MSRV 1.88, CI/Jenkins test coverage fixed |
 | 2.7.1 | Docs only | Documentation aligned with behavior (error status mapping, header read timeout default, rate-limit keying, session doctest) |
 | 2.8.0 | Hot-path allocations & syscalls | Zero-alloc cookie lookup (parse only the match), fewer static-file syscalls (redundant `metadata`/`fstat` removed, `ServeDir` base resolved once), builder-time `HeaderValue` parsing (`Cache-Control`), precomputed deletion cookie, allocation-free 429, zero-copy fixed-text responses, single-pass `Cow`/`Bytes` responses |
+| 2.8.1 | Negotiation allocations | Allocation-free `Accept-Encoding`/content-type case-insensitive matching in static serving and the gzip middleware; CHANGELOG link/tag backfill (v1.0.0–v1.2.0) |
 
 ## Roadmap: 2.x → 3.0
 

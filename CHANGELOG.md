@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.8.1] - 2026-09-19
+
+### Performance
+
+- **Encoding/content-type negotiation is allocation-free**: the
+  `Accept-Encoding` scan in static-file serving (and the gzip middleware's
+  negotiation and content-type checks) compares case-insensitively in
+  place instead of building a lowercased copy of the header value on every
+  request.
+
+### Fixed
+
+- CHANGELOG reference links: added the missing compare-link definitions for
+  2.7.1/2.8.0, corrected the 1.0.0 date, and backfilled `v1.0.0`–`v1.2.0`
+  tags + GitHub releases so every version's links resolve.
+
+---
+
 ## [2.8.0] - 2026-09-19
 
 ### Performance
@@ -601,7 +619,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.0.0] - 2025-07-24
+## [1.0.0] - 2026-01-13
 
 ### Added
 
@@ -618,6 +636,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 [1.7.0]: https://github.com/desirable-rs/desirable/compare/v1.6.0...v1.7.0
+[2.8.0]: https://github.com/desirable-rs/desirable/compare/v2.7.1...v2.8.0
+[2.7.1]: https://github.com/desirable-rs/desirable/compare/v2.7.0...v2.7.1
 [2.7.0]: https://github.com/desirable-rs/desirable/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/desirable-rs/desirable/compare/v2.5.1...v2.6.0
 [2.5.1]: https://github.com/desirable-rs/desirable/compare/v2.5.0...v2.5.1
@@ -640,3 +660,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [1.1.0]: https://github.com/desirable-rs/desirable/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/desirable-rs/desirable/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/desirable-rs/desirable/releases/tag/v1.0.0
+
+[2.8.1]: https://github.com/desirable-rs/desirable/compare/v2.8.0...v2.8.1

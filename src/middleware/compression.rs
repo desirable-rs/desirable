@@ -35,6 +35,14 @@ const SKIP_TYPE_PREFIXES: &[&str] = &[
   "application/wasm",
 ];
 
+/// Case-insensitive ASCII `starts_with` for a trimmed string — no
+/// allocation (both checks run per request).
+fn starts_with_ignore_case(part: &str, prefix: &str) -> bool {
+  let part = part.trim();
+  part.len() >= prefix.len()
+    && part.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
 /// gzip response-compression middleware (feature `compression`).
 ///
 /// When the client sends `Accept-Encoding: gzip` and the response is an
@@ -63,10 +71,10 @@ impl Compression {
     req
       .header("accept-encoding")
       .and_then(|v| v.to_str().ok())
+      // Simplified negotiation: presence of the token, ignoring q-values.
       .is_some_and(|v| {
-        // Simplified negotiation: presence of the token, ignoring q-values.
         v.split(',')
-          .any(|part| part.trim().to_ascii_lowercase().starts_with("gzip"))
+          .any(|part| starts_with_ignore_case(part, "gzip"))
       })
   }
 
@@ -78,10 +86,9 @@ impl Compression {
     else {
       return false;
     };
-    let lower = ct.to_ascii_lowercase();
     !SKIP_TYPE_PREFIXES
       .iter()
-      .any(|prefix| lower.starts_with(prefix))
+      .any(|prefix| starts_with_ignore_case(ct, prefix))
   }
 }
 
@@ -157,5 +164,18 @@ mod tests {
   #[test]
   fn test_compression_middleware_constructible() {
     let _ = Compression::new();
+  }
+
+  #[test]
+  fn test_starts_with_ignore_case() {
+    assert!(starts_with_ignore_case("gzip", "gzip"));
+    assert!(starts_with_ignore_case("GZIP", "gzip"));
+    assert!(starts_with_ignore_case("gZip;q=0.5", "gzip"));
+    assert!(starts_with_ignore_case("  Image/png", "image/"));
+    assert!(!starts_with_ignore_case("gzi", "gzip"));
+    assert!(!starts_with_ignore_case("text/html", "image/"));
+    // Prefix match by design: "gzipx" matches the "gzip" token, matching
+    // the previous lowercase-then-starts_with behavior.
+    assert!(starts_with_ignore_case("gzipx", "gzip"));
   }
 }
