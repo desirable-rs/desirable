@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.0.1] - 2026-09-19
+
+### Fixed
+
+- **Documentation-only.** README refreshed for the 3.x line: version refs
+  updated from `1.7` to `3`, MSRV badge + requirement (1.88), dependency
+  count corrected (26 default-active), and the missing capabilities
+  documented (streaming bodies / SSE via `Body::channel`, trusted proxies +
+  `client_ip()`, Unix domain sockets / pre-bound listeners / header read
+  timeout, O(1) static-route matching, explicit HEAD routing).
+- Fixed 5 copy-paste-broken doc examples across README, crate docs, and
+  rustdoc that showed zero-argument handler closures (`|| async { ... }`);
+  handlers take the `Request` argument (`|_| async { ... }` — the
+  `Endpoint` impl requires `Fn(Request) -> Fut`), and the SSE example is
+  now compile-verified.
+
 ## [3.0.0] - 2026-09-19
 
 The breaking-convergence release planned since 2.0. The breaking surface is
@@ -741,3 +757,4 @@ one dead constructor.
 [2.9.0]: https://github.com/desirable-rs/desirable/compare/v2.8.1...v2.9.0
 
 [3.0.0]: https://github.com/desirable-rs/desirable/compare/v2.9.0...v3.0.0
+[3.0.1]: https://github.com/desirable-rs/desirable/compare/v3.0.0...v3.0.1

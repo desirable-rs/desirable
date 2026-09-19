@@ -157,7 +157,7 @@ fn resolve_client_ip(
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///   let router = Router::new();
-///   router.get("/", || async { "Hello!" });
+///   router.get("/", |_| async { "Hello!" });
 ///
 ///   let server = desirable::new("127.0.0.1:8080");
 ///   server.run(router).await

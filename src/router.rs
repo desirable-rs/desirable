@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// use desirable::{Router, Result};
 ///
 /// let mut router = Router::new();
-/// router.get("/", || async { "Home" });
+/// router.get("/", |_| async { "Home" });
 /// router.get("/users/:id", |req| async {
 ///   let id: i32 = req.param("id").unwrap();
 ///   format!("User {}", id)
@@ -256,7 +256,7 @@ impl Router {
   /// # Example
   ///
   /// ```rust,ignore
-  /// router.get("/", || async { "Home" });
+  /// router.get("/", |_| async { "Home" });
   /// router.get("/users/:id", |req| async {
   ///   format!("User {}", req.param::<i32>("id").unwrap())
   /// });
@@ -410,7 +410,7 @@ impl Router {
   /// }
   ///
   /// router.with(Logger);
-  /// router.get("/", || async { "logged" });
+  /// router.get("/", |_| async { "logged" });
   /// ```
   pub fn with(&mut self, middleware: impl Middleware) {
     self.middlewares.push(Arc::new(middleware));

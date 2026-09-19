@@ -12,7 +12,7 @@
 //! #[tokio::main]
 //! async fn main() -> Result<()> {
 //!   let mut router = Router::new();
-//!   router.get("/", || async { "Hello, World!" });
+//!   router.get("/", |_| async { "Hello, World!" });
 //!
 //!   let addr = env::args()
 //!     .nth(1)

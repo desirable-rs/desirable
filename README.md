@@ -6,6 +6,7 @@
 [![Documentation](https://docs.rs/desirable/badge.svg)](https://docs.rs/desirable)
 [![Build](https://github.com/desirable-rs/desirable/actions/workflows/rust.yml/badge.svg)](https://github.com/desirable-rs/desirable/actions)
 [![License](https://img.shields.io/crates/l/desirable.svg)](https://github.com/desirable-rs/desirable#license)
+[![MSRV](https://img.shields.io/badge/MSRV-1.88-blue)](https://github.com/desirable-rs/desirable#install)
 
 Built on [hyper](https://github.com/hyperium/hyper) and [tokio](https://github.com/tokio-rs/tokio), desirable keeps the concepts you already know — plain functions as handlers, one-line middleware, typed state — and skips the rest. No macros, no extractor generics, no tower ecosystem required.
 
@@ -13,7 +14,7 @@ Built on [hyper](https://github.com/hyperium/hyper) and [tokio](https://github.c
 
 ```toml
 [dependencies]
-desirable = "1.7"
+desirable = "3"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -58,12 +59,13 @@ async fn get_user(req: Request) -> Result {
 app.get("/users/:id", |req: Request| get_user(req));
 ```
 
-**Routing** — path parameters, all HTTP methods, trailing-slash tolerance, correct `404`/`405 + Allow` semantics:
+**Routing** — path parameters, all HTTP methods, trailing-slash tolerance, correct `404`/`405 + Allow` semantics. Static paths match in O(1) (exact-match index in front of the pattern tables); explicit HEAD routes are honored, and HEAD falls back to GET routes otherwise:
 
 ```rust,ignore
 app.get("/users/:id", handler);        // GET /users/42 → 200
 app.post("/users", handler);           // GET /users/   → 200 (trailing slash tolerated)
                                        // DELETE /users → 405 + Allow: GET
+app.head("/health", handler);          // explicit HEAD; HEAD /users → GET's headers, no body
 ```
 
 **Built-in middleware** — one line each (gzip compression behind the
@@ -95,6 +97,24 @@ app.get("/static/*file",
     desirable::ServeDir::new(dir)
         .precompressed(true)
         .cache_control("public, max-age=31536000, immutable"));
+```
+
+**Streaming bodies** — buffered or streamed, one body type. `Body::channel`
+makes server-sent events a few lines (the response ends when the sender drops):
+
+```rust,ignore
+app.get("/events", |_| async {
+    let (sender, body) = desirable::Body::channel(16);
+    tokio::spawn(async move {
+        for i in 0.. {
+            if sender.send(format!("data: tick {i}\n\n")).await.is_err() {
+                break; // client went away
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+    desirable::Response::builder().text(body)
+});
 ```
 
 **WebSocket** (feature `websocket`) — handshake, upgrade, and connection
@@ -138,6 +158,17 @@ app.post("/login", |req: Request| async move {
 });
 ```
 
+**Trusted proxies** — behind nginx/ALB, declare which peers may set `X-Forwarded-For`; the rightmost non-trusted address becomes `req.client_ip()` (also the rate-limit key). Off by default — a direct client's spoofed header is ignored:
+
+```rust,ignore
+desirable::Server::try_bind("0.0.0.0:3000")?
+    .trusted_proxies(["10.0.0.0/8", "172.17.0.1"])
+    .run(app)
+    .await?;
+// in handlers:
+let ip = req.client_ip();
+```
+
 **Sensible errors** — client mistakes map to `400`, oversized bodies to `413`; `5xx` bodies never leak internals (they're logged instead). Render all errors your way with `set_error_handler(|err| ...)`.
 
 **Graceful shutdown** — Ctrl+C **and** SIGTERM stop the accept loop, let in-flight requests finish (configurable drain timeout, default 10s), then exit.
@@ -147,22 +178,46 @@ server.run(app).await?;                    // graceful on Ctrl+C / SIGTERM
 server.run_with_shutdown(app, my_signal).await?;   // programmable
 ```
 
+**Server capabilities** — Unix domain sockets, pre-bound listeners (systemd
+socket activation, multi-listener deployments with a shared shutdown), and
+slow-client protection:
+
+```rust,ignore
+desirable::Server::bind_unix("/tmp/app.sock")           // UDS instead of TCP
+    .http1_header_read_timeout(Duration::from_secs(10)) // slow-loris guard
+    .run(app).await?;
+
+server.run_tcp_listener(app, listener).await?;          // pre-bound listener
+```
+
 ## Install
+
+Requires Rust **1.88** or newer (`rust-version = "1.88"`; let-chains are used
+throughout).
 
 ```toml
 [dependencies]
-desirable = "1.7"
+desirable = "3"
 ```
 
 ## Documentation
 
 - [docs.rs/desirable](https://docs.rs/desirable) — full API reference
 - [CHANGELOG](CHANGELOG.md) — release notes for every version
+- [ROADMAP](ROADMAP.md) — what shipped, what is deliberately deferred, and why
 - [examples/](examples/) — a small application using routing, middleware, sessions, and static files
 
 ## Performance
 
-The release profile ships with LTO, `opt-level = "z"`, and stripped binaries. Core crate dependencies: 24, zero of them added for convenience features. Run `cargo bench` for router/response microbenchmarks.
+The release profile ships with LTO, `opt-level = "z"`, and stripped binaries.
+Default builds pull in 26 dependencies (31 entries with the optional
+`compression`/`websocket`/`tls` feature subtrees — every convenience feature
+is cargo-feature gated, and each gated dependency is mature and widely
+audited). Static routes match in O(1); parameterized routes use
+`route_recognizer`. `cargo bench` runs the router/response microbenchmarks
+plus `middleware_overhead`, which measures the middleware chain's per-layer
+cost (~38 ns/layer — the evidence behind keeping the `dyn Middleware` trait
+in 3.0).
 
 ## References
 
