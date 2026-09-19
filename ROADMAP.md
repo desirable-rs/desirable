@@ -34,6 +34,7 @@ arrives.
 | 2.8.0 | Hot-path allocations & syscalls | Zero-alloc cookie lookup (parse only the match), fewer static-file syscalls (redundant `metadata`/`fstat` removed, `ServeDir` base resolved once), builder-time `HeaderValue` parsing (`Cache-Control`), precomputed deletion cookie, allocation-free 429, zero-copy fixed-text responses, single-pass `Cow`/`Bytes` responses |
 | 2.8.1 | Negotiation allocations | Allocation-free `Accept-Encoding`/content-type case-insensitive matching in static serving and the gzip middleware; CHANGELOG link/tag backfill (v1.0.0–v1.2.0) |
 | 2.9.0 | Routing algorithmics | O(1) static-route fast path in front of the linear pattern tables, explicit `Router::head()` routes made reachable (HEAD table consulted before the GET fallback), axum-style static-over-param precedence, streaming strong-ETag hashing (no whole-file buffer) |
+| 3.0.0 | Breaking convergence | Internal types de-pubbed (`Svc`, `dispatch`), dead `Request::mk_request` removed; trait-redesign declined on benchmark evidence (~38 ns/layer); extractor decision finalized (no extractors, no macros); MSRV 1.88 / edition 2024 confirmed |
 
 ## Roadmap: 2.x → 3.0
 
@@ -90,19 +91,33 @@ changes: MSRV/edition, deprecated removals, and the extractor decision.
 - Note: WebSocket-over-h2 needs the extended-CONNECT flow — documented as
   h1-only until then.
 
-### v3.0 — Breaking convergence
+### v3.0 — Breaking convergence ✅ shipped
 
-- **MSRV** moves to the stable released ~2 years prior; edition re-evaluated.
-- Removal of everything deprecated during 2.x.
-- **Extractor decision point** — one of:
-  1. keep the named-`async fn`-returning-`Result` pattern as the permanent
-     API (current recommendation; zero macros),
-  2. a limited extractor trait (no macros) for `State<T>` / path tuples,
-  3. a `#[handler]` macro (breaks the no-macros principle — requires strong
-     justification).
-- Public-API audit: de-`pub` internal types (`Svc`, `dispatch`), plus any
-  accumulated small renames.
-- Request-side streaming evaluation, only if real demand exists.
+The convergence release. Decisions taken, with their evidence:
+
+- **Middleware/Endpoint traits keep `dyn` dispatch — redesigned nothing.**
+  The last open performance question was `#[async_trait]`'s per-layer
+  `Pin<Box<dyn Future>>`. Measured with a chain mirroring `Next::run`
+  (`benches/middleware_overhead.rs`): ~38 ns per middleware layer
+  (0 layers: 40 ns, 3 layers: 153 ns, 8 layers: 378 ns). Against real
+  handler work (JSON + I/O, microseconds and up) this is <0.01%. Removing
+  it means abandoning `dyn Middleware` — rewrites the router's scoped-chain
+  capture, `merge`, and every user's middleware signature — for
+  nanoseconds. Declined on evidence; the benchmark stays in the repo.
+- **Extractor decision point resolved: option 1.** The named-`async fn`-
+  returning-`Result` pattern is the permanent API. No extractor traits, no
+  macros; `req.state::<T>()` / `req.param::<T>()` cover the use cases.
+- **Public-API audit**: `server::Svc` and `server::dispatch` are now
+  `pub(crate)` (they were never meant to be public); the unused
+  `Request::mk_request` constructor is removed (`Request::new` covers it).
+  `Router`'s public fields stay: they are documented and used for
+  introspection.
+- **MSRV stays 1.88 / edition 2024.** The let-chains used throughout the
+  codebase floor the MSRV at 1.88, so the "stable from ~2 years ago" rule
+  cannot go lower today.
+- **Nothing was deprecated during 2.x** — the removal list is the audit
+  above.
+- **Request-side streaming stays deferred** (demand-gated, unchanged).
 
 ### Dependency policy for all of 2.x
 

@@ -40,16 +40,16 @@ enum BindTarget {
 /// Internal service type for hyper integration.
 ///
 /// Adapts the router to hyper's Service trait.
-pub struct Svc {
+pub(crate) struct Svc {
   /// The router for handling requests
-  pub router: Arc<Router>,
+  pub(crate) router: Arc<Router>,
   /// The remote address of the client (`None` for Unix domain sockets)
-  pub remote_addr: Option<Arc<SocketAddr>>,
+  pub(crate) remote_addr: Option<Arc<SocketAddr>>,
   /// Trusted proxy networks used to resolve the real client IP
-  pub trusted_proxies: Arc<Vec<IpNet>>,
+  pub(crate) trusted_proxies: Arc<Vec<IpNet>>,
   /// Connection/task tracker shared with the accept loop, so spawned work
   /// (e.g. WebSocket sessions) is counted by graceful shutdown
-  pub tracker: Arc<TaskTracker>,
+  pub(crate) tracker: Arc<TaskTracker>,
 }
 
 impl Service<HyperRequest> for Svc {
@@ -69,8 +69,8 @@ impl Service<HyperRequest> for Svc {
 
 /// Dispatches a hyper request through the router.
 ///
-/// This is an internal function that converts hyper types to framework types
-/// and routes the request through the application router.
+/// Internal: converts hyper types to framework types and routes the request
+/// through the application router.
 ///
 /// # Arguments
 ///
@@ -82,7 +82,7 @@ impl Service<HyperRequest> for Svc {
 /// # Returns
 ///
 /// The hyper response or an error
-pub async fn dispatch(
+async fn dispatch(
   req: HyperRequest,
   remote_addr: Option<Arc<SocketAddr>>,
   trusted_proxies: Arc<Vec<IpNet>>,

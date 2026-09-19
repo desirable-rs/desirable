@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.0.0] - 2026-09-19
+
+The breaking-convergence release planned since 2.0. The breaking surface is
+deliberately small: internal types that were never meant to be public, and
+one dead constructor.
+
+### Removed (breaking)
+
+- **`server::Svc` is no longer public API.** It is the internal hyper
+  `Service` adapter; nothing outside the crate can use it meaningfully.
+- **`server::dispatch` is no longer public API.** Same reasoning — requests
+  enter through `Server::run`/`Router`, never through this function.
+- **`Request::mk_request` removed.** A zero-use convenience alias for
+  `Request::new(request, None)`.
+
+### Added
+
+- **Middleware-chain boxing benchmark** (`benches/middleware_overhead.rs`):
+  measures `#[async_trait]`'s per-layer boxed-future cost in the exact
+  `Next::run` chain shape. Result: ~38 ns per middleware layer (0 layers:
+  40 ns, 3: 153 ns, 8: 378 ns).
+
+### Decisions recorded (ROADMAP)
+
+- **The `Middleware`/`Endpoint` traits keep `dyn` dispatch.** The redesign
+  that would remove per-layer boxing (generic axum-style layering) rewrites
+  every user's middleware signature and the router's scoped-chain/`merge`
+  machinery — for <0.01% of a real request's cost. Declined on evidence.
+- **Extractor decision finalized: none.** The named-`async fn`-returning-
+  `Result` handler pattern is the permanent API; `req.state::<T>()` /
+  `req.param::<T>()` stay the way data reaches handlers. No macros.
+- **MSRV stays 1.88, edition 2024** (let-chains floor the toolchain
+  requirement). Nothing was deprecated during 2.x, so there is nothing
+  else to remove.
+
+---
+
 ## [2.9.0] - 2026-09-19
 
 ### Fixed
@@ -702,3 +739,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [2.8.1]: https://github.com/desirable-rs/desirable/compare/v2.8.0...v2.8.1
 
 [2.9.0]: https://github.com/desirable-rs/desirable/compare/v2.8.1...v2.9.0
+
+[3.0.0]: https://github.com/desirable-rs/desirable/compare/v2.9.0...v3.0.0

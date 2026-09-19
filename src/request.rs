@@ -57,13 +57,6 @@ impl Request {
     }
   }
 
-  /// Creates a new Request from a hyper request without a remote address.
-  ///
-  /// This is a convenience constructor for cases where the remote address is not needed.
-  pub fn mk_request(request: HyperRequest) -> Self {
-    Request::new(request, None)
-  }
-
   /// Returns a reference to the HTTP method.
   pub fn method(&self) -> &hyper::Method {
     self.inner.method()
