@@ -62,7 +62,8 @@ pub use kernel::{DynEndpoint, Endpoint, Middleware, Next};
 #[cfg(feature = "compression")]
 pub use middleware::Compression;
 pub use middleware::{
-  BodyLimit, Logger, RateLimit, RequestId, RequestIdValue, SessionHandle, SessionLayer, Timeout,
+  BodyLimit, Csrf, Logger, RateLimit, RequestId, RequestIdValue, SecurityHeaders, SessionHandle,
+  SessionLayer, Timeout,
 };
 pub use request::{Request, RequestBodyStream};
 pub use response::Response;

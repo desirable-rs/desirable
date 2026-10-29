@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.6.0] - 2026-09-19
+
+### Added
+
+- **`Csrf` middleware** — double-submit-cookie CSRF protection, zero new
+  dependencies: a readable `csrf_token` cookie is armed on the first safe
+  request; `POST`/`PUT`/`PATCH`/`DELETE` must echo it in `X-CSRF-Token`
+  (compared in constant time via digests) or receive `403`. Builder
+  options: `cookie_name`, `secure`. Frontend pattern: read the cookie once,
+  send it back as a header on every mutating request.
+- **`SecurityHeaders` middleware** — one line to opt in to the standard
+  hardening headers: `nosniff()`, `frame_options_deny()`/`_same_origin()`,
+  `referrer_policy()`, `hsts(max_age)`,
+  `content_security_policy()`. Values are parsed at construction
+  (fail-fast) and applied per response with no allocation.
+- **`TestResponse::header_all`** — every value of a response header, for
+  asserting multiple `Set-Cookie`s.
+
+### Fixed
+
+- **Session fixation (store mode)**: `Session::regenerate_id()` — the
+  canonical post-login rotation — now revokes the arriving pre-login
+  session's server-side entry automatically, so an attacker who learned the
+  fixated ID gets nothing. Cookie mode was already safe (the old cookie's
+  signature no longer matches); e2e verifies a replayed pre-rotation cookie
+  starts a fresh session.
+
 ## [3.5.0] - 2026-09-19
 
 ### Fixed
@@ -878,3 +905,4 @@ one dead constructor.
 [3.3.0]: https://github.com/desirable-rs/desirable/compare/v3.2.0...v3.3.0
 [3.4.0]: https://github.com/desirable-rs/desirable/compare/v3.3.0...v3.4.0
 [3.5.0]: https://github.com/desirable-rs/desirable/compare/v3.4.0...v3.5.0
+[3.6.0]: https://github.com/desirable-rs/desirable/compare/v3.5.0...v3.6.0

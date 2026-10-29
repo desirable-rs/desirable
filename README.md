@@ -211,6 +211,27 @@ let ip = req.client_ip();
 
 **Safe by default** — request bodies are capped at 2 MiB (`413` beyond), so one huge upload can't exhaust memory. Raise or lower it per server (`server.body_limit(16 * 1024 * 1024)`, `server.no_body_limit()`) or per route with the `BodyLimit` middleware, which overrides the server default. Optionally cap concurrent connections (`server.max_connections(10_000)` — overflow is closed fail-fast). Every request is also wrapped in a `tracing` span carrying `http.method`/`http.path`/`http.request_id`, so handler logs are auto-correlated.
 
+**Security** — CSRF protection (double-submit cookie, constant-time token
+compare), hardening headers, and session-fixation defense, all one line each:
+
+```rust,ignore
+use desirable::{Csrf, SecurityHeaders};
+
+app.with(Csrf::new().secure(true));   // X-CSRF-Token checked on POST/PUT/PATCH/DELETE
+app.with(
+    SecurityHeaders::new()
+        .nosniff()
+        .frame_options_deny()
+        .referrer_policy("strict-origin-when-cross-origin")
+        .hsts(31_536_000)                          // HTTPS-only deployments
+        .content_security_policy("default-src 'self'"),
+);
+
+// Session fixation: rotate the ID at login — in store mode the pre-login
+// session is revoked server-side automatically.
+req.session().lock().unwrap().regenerate_id();
+```
+
 **Graceful shutdown** — Ctrl+C **and** SIGTERM stop the accept loop, let in-flight requests finish (configurable drain timeout, default 10s), then exit.
 
 ```rust,ignore

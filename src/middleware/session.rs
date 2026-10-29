@@ -80,7 +80,9 @@ impl SessionLayer {
 impl Middleware for SessionLayer {
   async fn handle(&self, mut req: Request, next: Next<'_>) -> Result {
     // Load (or start) the session for this request; the cookie lookup is
-    // borrowing, so no per-request allocation happens here.
+    // borrowing, so no per-request allocation happens here. The ID the
+    // request arrived with is remembered so a handler-side
+    // `Session::regenerate_id()` (session-fixation defense) can revoke it.
     let session = {
       let cookie = self.manager.get_cookie_value_str(req.inner.headers());
       match cookie {
@@ -95,6 +97,7 @@ impl Middleware for SessionLayer {
         None => self.manager.create_session(),
       }
     };
+    let original_id = Some(session.id().to_string());
 
     // Share the session with handlers; keep our own clone to persist after.
     let handle = SessionHandle::new(session);
@@ -106,8 +109,9 @@ impl Middleware for SessionLayer {
     // Persist the session only when handlers actually changed it; a
     // destroyed session gets a deletion cookie — and, in store mode, its
     // server-side entry is removed so stolen cookies die immediately.
-    // The lock is dropped (via a snapshot) before awaiting the store, so
-    // the future stays Send.
+    // A regenerated ID revokes the entry the request arrived with (the
+    // potentially-fixated pre-login session). The lock is dropped (via a
+    // snapshot) before awaiting the store, so the future stays Send.
     if let Ok(res) = &mut response {
       let action = {
         let session = persist.lock().expect("session mutex poisoned");
@@ -120,8 +124,21 @@ impl Middleware for SessionLayer {
         }
       };
       if let Some((destroyed, id, snapshot)) = action {
+        // Revoke every server-side entry this request is responsible for:
+        // the arriving ID when it changed (regeneration) or was destroyed,
+        // and the current ID on destroy.
+        for stale in [
+          original_id
+            .as_deref()
+            .filter(|orig| destroyed || *orig != id),
+          destroyed.then_some(id.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+          self.manager.revoke_session(stale).await;
+        }
         if destroyed {
-          self.manager.revoke_session(&id).await;
           res.append_header(
             hyper::header::SET_COOKIE,
             self.manager.make_deletion_cookie(),

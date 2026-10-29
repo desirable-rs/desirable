@@ -188,6 +188,11 @@ impl TestResponse {
     self.headers.get(name)
   }
 
+  /// Every value of the named response header (e.g. multiple `Set-Cookie`).
+  pub fn header_all(&self, name: &str) -> Vec<&hyper::header::HeaderValue> {
+    self.headers.get_all(name).iter().collect()
+  }
+
   /// The response body.
   pub fn bytes(self) -> Bytes {
     self.body

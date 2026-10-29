@@ -143,3 +143,80 @@ async fn manager_store_roundtrip_and_revoke() {
   manager.revoke_session(session.id()).await;
   assert!(manager.read_session(cookie_value).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn store_mode_regenerate_id_revokes_the_old_session() {
+  // Session-fixation defense: after `Session::regenerate_id()` (the
+  // canonical post-login move), the arriving pre-login session ID must be
+  // revoked server-side — an attacker who learned it gets nothing.
+  let manager = SessionManager::new(SessionConfig::new(KEY).max_age_secs(3600))
+    .with_store(MemorySessionStore::new());
+  let mut app = Router::new();
+  app.with(SessionLayer::new(manager));
+
+  app.post("/stage", |req: Request| async move {
+    req.session().lock().unwrap().insert("staged", "x")?;
+    Ok::<_, desirable::Error>(Response::builder().text("staged"))
+  });
+  app.post("/rotate", |req: Request| async move {
+    // The canonical post-login move: keep the data, mint a fresh ID.
+    req.session().lock().unwrap().regenerate_id();
+    Ok::<_, desirable::Error>(Response::builder().text("rotated"))
+  });
+  app.get("/who", |req: Request| async move {
+    let staged: Option<String> = req.session().lock().unwrap().get("staged")?;
+    match staged {
+      Some(_) => Ok::<_, desirable::Error>(Response::builder().text("known")),
+      None => Ok(
+        Response::builder()
+          .status(desirable::http::StatusCode::NOT_FOUND)
+          .text("unknown"),
+      ),
+    }
+  });
+
+  let server = TestServer::spawn(app).await;
+
+  // Stage data under the first (potentially fixated) session ID.
+  let res = server.post("/stage", "").await;
+  assert_eq!(res.status(), hyper::StatusCode::OK);
+  let old_cookie = session_cookie(&res).expect("stage must set a session cookie");
+
+  // Rotate while carrying the old cookie: the response re-issues the
+  // session under a NEW ID.
+  let res = server
+    .request_with("POST", "/rotate", &[("Cookie", old_cookie.as_str())], None)
+    .await;
+  assert_eq!(res.status(), hyper::StatusCode::OK);
+  let new_cookie = res
+    .header_all("set-cookie")
+    .iter()
+    .find_map(|v| {
+      let value = v.to_str().ok()?;
+      value
+        .starts_with("desirable_session=")
+        .then(|| value.split(';').next().unwrap().trim().to_string())
+    })
+    .expect("rotation must re-issue the session cookie");
+  assert_ne!(old_cookie, new_cookie, "regenerate_id must mint a new ID");
+
+  // The new cookie carries the session data over.
+  let res = server
+    .request_with("GET", "/who", &[("Cookie", new_cookie.as_str())], None)
+    .await;
+  assert_eq!(res.status(), hyper::StatusCode::OK);
+  assert_eq!(res.text(), "known");
+
+  // THE FIXATION TEST: replaying the pre-rotation cookie must NOT see the
+  // session — its server-side entry was revoked during persistence.
+  let res = server
+    .request_with("GET", "/who", &[("Cookie", old_cookie.as_str())], None)
+    .await;
+  assert_eq!(
+    res.status(),
+    hyper::StatusCode::NOT_FOUND,
+    "pre-rotation cookie must be revoked"
+  );
+
+  server.shutdown().await.unwrap();
+}
