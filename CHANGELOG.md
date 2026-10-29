@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.7.0] - 2026-09-19
+
+### Added
+
+- **Request spans carry the outcome.** The framework's per-request
+  `tracing` span now records `http.status` and `http.duration_ms` when the
+  response completes — one span is the full request record (method, path,
+  request id, status, time) for any structured subscriber, with zero
+  configuration.
+- **`Metrics` middleware** (zero dependencies): lock-free atomic counters —
+  total requests, responses per status class (`2xx`/`3xx`/`4xx`/`5xx`),
+  in-flight gauge, cumulative handler duration. Read via
+  `Metrics::snapshot()` or render with `Metrics::render_prometheus()`
+  (standard text exposition format, `desirable_*` metric family). Deliberately
+  no histograms/labels — plug the `metrics`/`prometheus` crates in your own
+  middleware for those.
+
 ## [3.6.0] - 2026-09-19
 
 ### Added
@@ -906,3 +923,4 @@ one dead constructor.
 [3.4.0]: https://github.com/desirable-rs/desirable/compare/v3.3.0...v3.4.0
 [3.5.0]: https://github.com/desirable-rs/desirable/compare/v3.4.0...v3.5.0
 [3.6.0]: https://github.com/desirable-rs/desirable/compare/v3.5.0...v3.6.0
+[3.7.0]: https://github.com/desirable-rs/desirable/compare/v3.6.0...v3.7.0

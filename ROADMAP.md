@@ -42,6 +42,7 @@ arrives.
 | 3.4.0 | Uploads & request streaming | `RequestBodyStream` (`body_stream`/`save_body_to`) with limit enforcement; streaming `multipart/form-data` parsing behind the `multipart` feature (multer), semantic error mapping (415/400/413); `example-uploads` |
 | 3.5.0 | Dep refresh + connection hygiene | Dependency majors migrated (rand 0.10, hmac 0.13, sha2 0.11, base64 0.23, tokio-tungstenite 0.30); bounded drain of unread bodies on 413 so error responses survive connection close instead of being destroyed by a TCP reset |
 | 3.6.0 | Production security suite | `Csrf` middleware (double-submit cookie, constant-time compare), `SecurityHeaders` middleware (nosniff/frame-options/HSTS/CSP, pre-parsed), session-fixation defense (store-mode `regenerate_id` auto-revokes the pre-login entry) |
+| 3.7.0 | Observability | Request span completed with `http.status`/`http.duration_ms` (zero-config full record); zero-dep `Metrics` middleware (status-class counters, in-flight gauge, duration sum) with snapshot API + Prometheus text output |
 
 ## Roadmap: 2.x → 3.0
 

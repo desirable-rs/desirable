@@ -252,6 +252,22 @@ desirable::Server::bind_unix("/tmp/app.sock")           // UDS instead of TCP
 server.run_tcp_listener(app, listener).await?;          // pre-bound listener
 ```
 
+**Observability** — every request runs in a `tracing` span that carries
+`http.method`, `http.path`, `http.request_id`, and, on completion,
+`http.status` + `http.duration_ms` — so one span is the full request record
+for structured subscribers. The zero-dependency `Metrics` middleware adds
+counters (total, per status class, in-flight, cumulative duration) with a
+snapshot API and Prometheus text output:
+
+```rust,ignore
+let metrics = desirable::Metrics::new();
+app.with(metrics.clone());
+app.get("/metrics", move |_| {
+    let metrics = metrics.clone();
+    async move { desirable::Response::builder().text(metrics.render_prometheus()) }
+});
+```
+
 **Testing** — `desirable::test` spawns your router on an ephemeral port and
 speaks real HTTP to it; zero extra dependencies:
 

@@ -107,7 +107,9 @@ impl Service<HyperRequest> for Svc {
 
 /// Creates the per-request tracing span that wraps request handling, so any
 /// `tracing` log emitted by handlers and middleware carries the request's
-/// method, path, and (when the client or `RequestId` provides one) request id.
+/// method, path, and (when the client or `RequestId` provides one) request
+/// id. On completion the span is enriched with `http.status` and
+/// `http.duration_ms`.
 fn request_span(method: &hyper::Method, path: &str, request_id: Option<&str>) -> tracing::Span {
   match request_id {
     Some(id) => tracing::info_span!(
@@ -115,12 +117,16 @@ fn request_span(method: &hyper::Method, path: &str, request_id: Option<&str>) ->
       http.method = %method,
       http.path = %path,
       http.request_id = %id,
+      http.status = tracing::field::Empty,
+      http.duration_ms = tracing::field::Empty,
     ),
     None => tracing::info_span!(
       "request",
       http.method = %method,
       http.path = %path,
       http.request_id = tracing::field::Empty,
+      http.status = tracing::field::Empty,
+      http.duration_ms = tracing::field::Empty,
     ),
   }
 }
@@ -173,14 +179,22 @@ async fn dispatch(
       .get("x-request-id")
       .and_then(|v| v.to_str().ok()),
   );
+  let started = std::time::Instant::now();
   // A propagated `Err` (middleware failure, invalid status code, ...) is
   // rendered like any other error — returning it raw would close the
   // connection with no response at all.
   let fut = router.dispatch(req.into(), remote_addr);
-  let response = match fut.instrument(span).await {
+  let response = match fut.instrument(span.clone()).await {
     Ok(resp) => resp,
     Err(err) => crate::error::render_error(err),
   };
+  // Enrich the span with the outcome, so structured subscribers see every
+  // request as one complete record (method, path, request id, status, time).
+  {
+    let _entered = span.enter();
+    span.record("http.status", response.status().as_u16());
+    span.record("http.duration_ms", started.elapsed().as_millis() as u64);
+  }
   Ok(response.inner)
 }
 
@@ -987,6 +1001,54 @@ mod tests {
     assert!(fields0.contains(&("http.request_id".to_string(), "abc-1".to_string())));
     // No incoming request id on the second span: the field stays empty.
     assert!(!state.spans[1].2.iter().any(|(f, _)| f == "http.request_id"));
+  }
+
+  #[test]
+  fn test_request_span_records_completion_fields() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<(String, String)>>>);
+
+    impl<S> tracing_subscriber::Layer<S> for Capture
+    where
+      S: tracing::Subscriber,
+    {
+      fn on_record(
+        &self,
+        _id: &tracing::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+      ) {
+        struct Visitor(Vec<(String, String)>);
+        impl tracing::field::Visit for Visitor {
+          fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self
+              .0
+              .push((field.name().to_string(), format!("{value:?}")));
+          }
+        }
+        let mut visitor = Visitor(Vec::new());
+        values.record(&mut visitor);
+        self.0.lock().unwrap().extend(visitor.0);
+      }
+    }
+
+    let captured = Capture(Arc::new(Mutex::default()));
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let subscriber = tracing_subscriber::registry().with(captured.clone());
+    tracing::subscriber::with_default(subscriber, || {
+      // Mirror dispatch: create the span, then record completion fields
+      // while the span is entered.
+      let span = request_span(&hyper::Method::GET, "/health", None);
+      let _guard = span.enter();
+      span.record("http.status", 200);
+      span.record("http.duration_ms", 3);
+    });
+
+    let fields = captured.0.lock().unwrap().clone();
+    assert!(fields.contains(&("http.status".to_string(), "200".to_string())));
+    assert!(fields.contains(&("http.duration_ms".to_string(), "3".to_string())));
   }
 
   #[test]
